@@ -11,6 +11,8 @@ Native C SDR capture service that publishes ZMQ frames and metadata.
   - `meta/service`
   - `meta/devices`
   - `meta/topics`
+- On shutdown/restart, stop RX and reset HackRF before close to improve clean re-open
+- Auto-retry device open on startup until hardware becomes available
 
 ## Topics
 

@@ -26,6 +26,7 @@ static atomic_int g_cleanup_done = 0;
 static app_ctx_t* g_cleanup_ctx = NULL;
 static sdr_device_handle_t* g_cleanup_handle = NULL;
 static sdr_zmq_publisher_t* g_cleanup_pub = NULL;
+static const int g_start_retry_delay_ms = 2000;
 
 static uint64_t now_monotonic_ns(void) {
   struct timespec ts;
@@ -186,6 +187,19 @@ static void cleanup_runtime(void) {
   }
 }
 
+static void sleep_interruptible_ms(int total_ms) {
+  if (total_ms <= 0) {
+    return;
+  }
+
+  int remaining = total_ms;
+  while (remaining > 0 && !atomic_load(&g_stop)) {
+    int chunk = remaining > 100 ? 100 : remaining;
+    usleep((useconds_t)chunk * 1000U);
+    remaining -= chunk;
+  }
+}
+
 static void usage(const char* prog) {
   fprintf(stderr,
           "Usage: %s [--driver rtl|hackrf] [--device-id id] [--index n] [--serial s] [--freq hz] [--sr hz] [--gain db] [--zmq endpoint]\n",
@@ -249,15 +263,32 @@ int main(int argc, char** argv) {
 
   publish_host_meta(&ctx);
   publish_topics_meta(&ctx);
-  publish_service_meta(&ctx, "RUNNING");
-  publish_devices_meta(&ctx, "RUNNING");
+  publish_service_meta(&ctx, "STARTING");
+  publish_devices_meta(&ctx, "STARTING");
 
   sdr_device_handle_t* handle = NULL;
-  if (sdr_device_start(&cfg, on_samples, &ctx, &handle) != 0) {
-    fprintf(stderr, "device start failed: %s\n", sdr_device_last_error());
-    return 1;
+  while (!atomic_load(&g_stop)) {
+    if (sdr_device_start(&cfg, on_samples, &ctx, &handle) == 0) {
+      break;
+    }
+
+    fprintf(stderr,
+            "device start failed: %s (retrying in %d ms)\n",
+            sdr_device_last_error(),
+            g_start_retry_delay_ms);
+    publish_service_meta(&ctx, "RECONNECTING");
+    publish_devices_meta(&ctx, "STOPPED");
+    sleep_interruptible_ms(g_start_retry_delay_ms);
+  }
+
+  if (!handle) {
+    cleanup_runtime();
+    return atomic_load(&g_stop) ? 0 : 1;
   }
   g_cleanup_handle = handle;
+
+  publish_service_meta(&ctx, "RUNNING");
+  publish_devices_meta(&ctx, "RUNNING");
 
   fprintf(stdout, "native_sdr started driver=%s device=%s zmq=%s\n",
           (cfg.driver == SDR_DRIVER_HACKRF) ? "hackrf" : "rtl",
