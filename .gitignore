@@ -1,0 +1,16 @@
+.DS_Store
+
+# UI
+ui/node_modules/
+ui/dist/
+ui/.env
+
+# Backend
+backend-service/.gradle/
+backend-service/build/
+
+# Native
+native-sdr/build/
+
+# Browser cache
+ui/.playwright-browsers/
