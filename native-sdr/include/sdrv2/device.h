@@ -21,6 +21,7 @@ typedef struct {
   uint32_t sample_rate_hz;
   uint64_t center_freq_hz;
   int gain_db;
+  int hackrf_reset_on_stop;
 } sdr_device_config_t;
 
 typedef void (*sdr_samples_cb)(const uint8_t* data,

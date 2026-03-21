@@ -11,7 +11,7 @@ Native C SDR capture service that publishes ZMQ frames and metadata.
   - `meta/service`
   - `meta/devices`
   - `meta/topics`
-- On shutdown/restart, stop RX and reset HackRF before close to improve clean re-open
+- On shutdown/restart, stop RX and close cleanly (hard USB reset is optional via flag)
 - Auto-retry device open on startup until hardware becomes available
 
 ## Topics
@@ -37,4 +37,10 @@ HackRF example:
 
 ```bash
 ./native_sdr --driver hackrf --device-id hackrf_0 --freq 2400000000 --sr 10000000 --zmq tcp://127.0.0.1:5555
+```
+
+Optional hard reset on exit (not recommended on some VMs):
+
+```bash
+./native_sdr --driver hackrf --device-id hackrf_0 --freq 2400000000 --sr 10000000 --zmq tcp://127.0.0.1:5555 --hard-reset-on-stop
 ```

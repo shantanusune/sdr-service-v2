@@ -202,7 +202,7 @@ static void sleep_interruptible_ms(int total_ms) {
 
 static void usage(const char* prog) {
   fprintf(stderr,
-          "Usage: %s [--driver rtl|hackrf] [--device-id id] [--index n] [--serial s] [--freq hz] [--sr hz] [--gain db] [--zmq endpoint]\n",
+          "Usage: %s [--driver rtl|hackrf] [--device-id id] [--index n] [--serial s] [--freq hz] [--sr hz] [--gain db] [--zmq endpoint] [--hard-reset-on-stop]\n",
           prog);
 }
 
@@ -214,6 +214,7 @@ int main(int argc, char** argv) {
   cfg.sample_rate_hz = 2560000;
   cfg.center_freq_hz = 2400000000ULL;
   cfg.gain_db = 0;
+  cfg.hackrf_reset_on_stop = 0;
   snprintf(cfg.device_id, sizeof(cfg.device_id), "rtl_0");
 
   char zmq_endpoint[128] = "tcp://127.0.0.1:5555";
@@ -238,6 +239,8 @@ int main(int argc, char** argv) {
       cfg.gain_db = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--zmq") == 0 && i + 1 < argc) {
       snprintf(zmq_endpoint, sizeof(zmq_endpoint), "%s", argv[++i]);
+    } else if (strcmp(argv[i], "--hard-reset-on-stop") == 0) {
+      cfg.hackrf_reset_on_stop = 1;
     } else {
       usage(argv[0]);
       return 2;

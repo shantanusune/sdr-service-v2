@@ -246,10 +246,12 @@ void sdr_device_stop(sdr_device_handle_t* h) {
 #ifdef HAVE_HACKRF
     if (h->hackrf) {
       hackrf_stop_rx(h->hackrf);
-      hackrf_reset(h->hackrf);
+      if (h->cfg && h->cfg->hackrf_reset_on_stop) {
+        hackrf_reset(h->hackrf);
+      }
       hackrf_close(h->hackrf);
       h->hackrf = NULL;
-      usleep(150000);
+      usleep(100000);
       hackrf_exit();
     }
 #endif
