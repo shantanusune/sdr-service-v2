@@ -111,6 +111,7 @@ const SpectrumLab: React.FC = () => {
   const [horizontalMarkers, setHorizontalMarkers] = useState<SpectrumHorizontalMarker[]>([]);
   const [horizontalMarkerInput, setHorizontalMarkerInput] = useState('');
   const [eventFilter, setEventFilter] = useState<EventFilter>('all');
+  const [isClearingEvents, setIsClearingEvents] = useState(false);
   const [layerOpacities, setLayerOpacities] = useState<Record<string, number>>({});
   const [isStreaming, setIsStreaming] = useState(false);
   const [fps, setFps] = useState<number>(() => {
@@ -320,6 +321,22 @@ const SpectrumLab: React.FC = () => {
     setMarkers([]);
     setHorizontalMarkers([]);
   }, []);
+
+  const handleClearConsole = useCallback(async () => {
+    if (isClearingEvents) {
+      return;
+    }
+
+    setIsClearingEvents(true);
+    try {
+      await http.delete('/api/events');
+      await refetchEvents();
+    } catch (err) {
+      console.error('Failed to clear event console', err);
+    } finally {
+      setIsClearingEvents(false);
+    }
+  }, [isClearingEvents, refetchEvents]);
 
   // Loading state
   if (isLoading) {
@@ -663,11 +680,21 @@ const SpectrumLab: React.FC = () => {
                   </SelectContent>
                 </Select>
                 <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5"
+                  onClick={handleClearConsole}
+                  disabled={isClearingEvents || detectionCount + nativeActivityCount === 0}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  {isClearingEvents ? 'Clearing...' : 'Clear'}
+                </Button>
+                <Button
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7"
                   onClick={() => refetchEvents()}
-                  disabled={isEventsRefetching}
+                  disabled={isEventsRefetching || isClearingEvents}
                 >
                   <RefreshCw className={`h-3.5 w-3.5 ${isEventsRefetching ? 'animate-spin' : ''}`} />
                 </Button>
