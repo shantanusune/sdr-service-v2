@@ -32,12 +32,18 @@ public class DetectionEventService {
     private static final int MIN_COMPLEX_SAMPLES = 256;
     private static final long WIFI_24_START_HZ = 2_400_000_000L;
     private static final long WIFI_24_END_HZ = 2_483_500_000L;
+    private static final long HOP_WINDOW_NS = 3_000_000_000L;
     private static final int MIN_DUMP_BYTES = 1024;
     private static final String IQ_DUMP_EXTENSION = ".iq";
+    private static final String EVENT_WIFI_CONTROL_LINK = "wifi_control_link";
+    private static final String EVENT_DIGITAL_VIDEO_LINK = "digital_video_link";
+    private static final String EVENT_FHSS_CONTROL_SUSPECTED = "fhss_control_suspected";
+    private static final String EVENT_UNKNOWN_24_GHZ = "unknown_2_4ghz";
 
     private final AppProperties props;
     private final List<DetectionEvent> events = new ArrayList<>();
     private final ConcurrentHashMap<String, Long> cooldownByDeviceAndType = new ConcurrentHashMap<>();
+    private final HashMap<String, SpectralState> lastSpectralByDevice = new HashMap<>();
 
     public DetectionEventService(AppProperties props) {
         this.props = props;
@@ -62,9 +68,13 @@ public class DetectionEventService {
             return;
         }
 
-        Classification classification = classify(features, threshold);
+        String deviceKey = frame.machineId() + "/" + frame.deviceId();
+        SpectralState previousState = lastSpectralByDevice.get(deviceKey);
+        long sampleTsNs = frame.timestampNs() > 0 ? frame.timestampNs() : System.nanoTime();
+        Classification classification = classify(features, threshold, previousState, sampleTsNs);
+        lastSpectralByDevice.put(deviceKey, new SpectralState(features.peakFreqHz(), sampleTsNs));
 
-        String cooldownKey = frame.machineId() + "/" + frame.deviceId() + "/" + classification.type();
+        String cooldownKey = deviceKey + "/" + classification.type();
         long now = System.currentTimeMillis();
         long until = cooldownByDeviceAndType.getOrDefault(cooldownKey, 0L);
         if (now < until) {
@@ -79,8 +89,15 @@ public class DetectionEventService {
         evidence.put("spectralFlatness", features.spectralFlatness());
         evidence.put("occupiedBandwidthHz", features.occupiedBandwidthHz());
         evidence.put("peakToMeanDb", features.peakToMeanDb());
+        evidence.put("peakFreqHz", features.peakFreqHz());
         evidence.put("wifiScore", classification.wifiScore());
         evidence.put("droneScore", classification.droneScore());
+        evidence.put("controlLinkScore", classification.controlLinkScore());
+        evidence.put("digitalVideoScore", classification.digitalVideoScore());
+        evidence.put("fhssScore", classification.fhssScore());
+        evidence.put("hopDeltaHz", classification.hopDeltaHz());
+        evidence.put("hopRateHzPerSec", classification.hopRateHzPerSec());
+        evidence.put("protocolLabel", classification.type());
         evidence.put("sampleRateHz", features.sampleRateHz());
         evidence.put("centerFreqHz", features.centerFreqHz());
         evidence.put("iqFormat", features.iqFormat());
@@ -115,6 +132,7 @@ public class DetectionEventService {
         int cleared = events.size();
         events.clear();
         cooldownByDeviceAndType.clear();
+        lastSpectralByDevice.clear();
         return cleared;
     }
 
@@ -234,6 +252,7 @@ public class DetectionEventService {
         double specPowerSum = 0.0;
         double logSpecPowerSum = 0.0;
         double peakPower = 1e-12;
+        int peakIndex = 0;
 
         for (int k = 0; k < bins; k++) {
             double p = (re[k] * re[k]) + (im[k] * im[k]) + 1e-12;
@@ -242,6 +261,7 @@ public class DetectionEventService {
             logSpecPowerSum += Math.log(p);
             if (p > peakPower) {
                 peakPower = p;
+                peakIndex = k;
             }
         }
 
@@ -259,6 +279,11 @@ public class DetectionEventService {
         double specMean = specPowerSum / bins;
         double spectralFlatness = Math.exp(logSpecPowerSum / bins) / specMean;
         double peakToMeanDb = 10.0 * Math.log10(peakPower / specMean);
+        double binHz = (frame.sampleRateHz() > 0) ? ((double) frame.sampleRateHz() / nfft) : 0.0;
+        long peakFreqHz = frame.centerFreqHz();
+        if (binHz > 0.0) {
+            peakFreqHz = frame.centerFreqHz() + Math.round(peakIndex * binHz);
+        }
 
         double occupiedBandwidthHz = 0.0;
         if (frame.sampleRateHz() > 0) {
@@ -282,7 +307,6 @@ public class DetectionEventService {
             }
 
             int occupiedBins = Math.max(1, highIdx - lowIdx + 1);
-            double binHz = (double) frame.sampleRateHz() / nfft;
             occupiedBandwidthHz = occupiedBins * binHz;
         }
 
@@ -294,13 +318,17 @@ public class DetectionEventService {
                 spectralFlatness,
                 occupiedBandwidthHz,
                 peakToMeanDb,
+                peakFreqHz,
                 frame.centerFreqHz(),
                 frame.sampleRateHz(),
                 frame.iqFormat()
         );
     }
 
-    private static Classification classify(FrameFeatures f, double threshold) {
+    private static Classification classify(FrameFeatures f,
+                                           double threshold,
+                                           SpectralState previousState,
+                                           long sampleTsNs) {
         boolean in24Band = isWifi24Band(f.centerFreqHz());
 
         double bandwidthMHz = f.occupiedBandwidthHz() / 1_000_000.0;
@@ -325,16 +353,150 @@ public class DetectionEventService {
             droneScore *= 0.75;
         }
 
-        if (in24Band && wifiScore >= 0.58 && wifiScore >= droneScore + 0.08) {
-            return new Classification("wifi_like_activity", "INFO", wifiScore, wifiScore, droneScore);
+        double hopDeltaHz = 0.0;
+        double hopRateHzPerSec = 0.0;
+        if (previousState != null && previousState.tsNs() > 0 && sampleTsNs > previousState.tsNs()) {
+            long dtNs = sampleTsNs - previousState.tsNs();
+            if (dtNs > 0 && dtNs <= HOP_WINDOW_NS) {
+                hopDeltaHz = Math.abs((double) f.peakFreqHz() - previousState.peakFreqHz());
+                double dtSec = dtNs / 1_000_000_000.0;
+                hopRateHzPerSec = hopDeltaHz / Math.max(1e-3, dtSec);
+            }
+        }
+        double hopDeltaScore = clamp01((hopDeltaHz - 250_000.0) / 4_000_000.0);
+        double hopRateScore = clamp01((hopRateHzPerSec - 180_000.0) / 3_000_000.0);
+
+        double videoBandwidthScore = clamp01((bandwidthMHz - 12.0) / 20.0);
+        double videoStabilityScore = clamp01((0.25 - f.powerVariance()) / 0.25);
+        double digitalVideoScore = (0.45 * videoBandwidthScore)
+                + (0.35 * flatnessScore)
+                + (0.20 * videoStabilityScore);
+        if (!in24Band) {
+            digitalVideoScore *= 0.2;
+        }
+
+        double controlBandwidthScore = closenessScore(bandwidthMHz, 7.0, 6.0);
+        double controlLinkScore = (0.35 * controlBandwidthScore)
+                + (0.25 * zcrScore)
+                + (0.20 * flatnessScore)
+                + (0.20 * energyScore);
+        if (bandwidthMHz > 18.0) {
+            controlLinkScore *= 0.65;
+        }
+        if (!in24Band) {
+            controlLinkScore *= 0.2;
+        }
+
+        double fhssNarrowScore = clamp01((6_500_000.0 - f.occupiedBandwidthHz()) / 6_500_000.0);
+        double fhssScore = (0.35 * fhssNarrowScore)
+                + (0.30 * hopDeltaScore)
+                + (0.20 * hopRateScore)
+                + (0.15 * burstScore);
+        if (bandwidthMHz > 12.0) {
+            fhssScore *= 0.7;
+        }
+        if (!in24Band) {
+            fhssScore *= 0.15;
+        }
+
+        if (in24Band) {
+            if (digitalVideoScore >= 0.58
+                    && digitalVideoScore >= controlLinkScore + 0.08
+                    && digitalVideoScore >= fhssScore + 0.06) {
+                return new Classification(
+                        EVENT_DIGITAL_VIDEO_LINK,
+                        "WARN",
+                        digitalVideoScore,
+                        wifiScore,
+                        droneScore,
+                        controlLinkScore,
+                        digitalVideoScore,
+                        fhssScore,
+                        hopDeltaHz,
+                        hopRateHzPerSec
+                );
+            }
+
+            if (fhssScore >= 0.54 && fhssScore >= controlLinkScore + 0.03) {
+                return new Classification(
+                        EVENT_FHSS_CONTROL_SUSPECTED,
+                        "WARN",
+                        fhssScore,
+                        wifiScore,
+                        droneScore,
+                        controlLinkScore,
+                        digitalVideoScore,
+                        fhssScore,
+                        hopDeltaHz,
+                        hopRateHzPerSec
+                );
+            }
+
+            if (controlLinkScore >= 0.50 || wifiScore >= 0.60) {
+                return new Classification(
+                        EVENT_WIFI_CONTROL_LINK,
+                        "INFO",
+                        Math.max(controlLinkScore, wifiScore),
+                        wifiScore,
+                        droneScore,
+                        controlLinkScore,
+                        digitalVideoScore,
+                        fhssScore,
+                        hopDeltaHz,
+                        hopRateHzPerSec
+                );
+            }
+
+            double unknownScore = clamp01(Math.max(energyScore * 0.65, Math.max(digitalVideoScore, Math.max(controlLinkScore, fhssScore)) * 0.80));
+            return new Classification(
+                    EVENT_UNKNOWN_24_GHZ,
+                    "INFO",
+                    unknownScore,
+                    wifiScore,
+                    droneScore,
+                    controlLinkScore,
+                    digitalVideoScore,
+                    fhssScore,
+                    hopDeltaHz,
+                    hopRateHzPerSec
+            );
         }
 
         if (droneScore >= 0.50) {
-            return new Classification("drone_iq_activity", "WARN", droneScore, wifiScore, droneScore);
+            return new Classification(
+                    "drone_iq_activity",
+                    "WARN",
+                    droneScore,
+                    wifiScore,
+                    droneScore,
+                    controlLinkScore,
+                    digitalVideoScore,
+                    fhssScore,
+                    hopDeltaHz,
+                    hopRateHzPerSec
+            );
         }
 
         double rfScore = clamp01(Math.max(energyScore * 0.60, Math.max(wifiScore, droneScore) * 0.75));
-        return new Classification("rf_band_activity", "INFO", rfScore, wifiScore, droneScore);
+        return new Classification(
+                "rf_band_activity",
+                "INFO",
+                rfScore,
+                wifiScore,
+                droneScore,
+                controlLinkScore,
+                digitalVideoScore,
+                fhssScore,
+                hopDeltaHz,
+                hopRateHzPerSec
+        );
+    }
+
+    private static double closenessScore(double value, double center, double halfWidth) {
+        if (halfWidth <= 0.0) {
+            return 0.0;
+        }
+        return clamp01(1.0 - (Math.abs(value - center) / halfWidth));
     }
 
     private void appendIqDumpEvidence(HashMap<String, Object> evidence, String eventId, RawIqFrame frame) {
@@ -522,15 +684,24 @@ public class DetectionEventService {
                                  double spectralFlatness,
                                  double occupiedBandwidthHz,
                                  double peakToMeanDb,
+                                 long peakFreqHz,
                                  long centerFreqHz,
                                  long sampleRateHz,
                                  int iqFormat) {
+    }
+
+    private record SpectralState(long peakFreqHz, long tsNs) {
     }
 
     private record Classification(String type,
                                   String severity,
                                   double confidence,
                                   double wifiScore,
-                                  double droneScore) {
+                                  double droneScore,
+                                  double controlLinkScore,
+                                  double digitalVideoScore,
+                                  double fhssScore,
+                                  double hopDeltaHz,
+                                  double hopRateHzPerSec) {
     }
 }

@@ -66,3 +66,9 @@ Detection events now include IQ dump metadata in `evidence` when dump is enabled
 - `iqDumpBytes`
 - `iqFrameBytes`
 - `iqDumpTruncated`
+
+2.4 GHz protocol labeling (heuristic IQ classification) emits detection types:
+- `wifi_control_link`
+- `digital_video_link`
+- `fhss_control_suspected`
+- `unknown_2_4ghz`
