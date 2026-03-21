@@ -56,10 +56,12 @@ interface EventsPayload {
 }
 
 type EventFilter = 'all' | 'detections' | 'activity';
+const ALL_EVENT_TYPES = '__all_event_types__';
 
 interface EventConsoleRow {
   id: string;
   kind: 'detection' | 'activity';
+  eventType: string;
   ts: string;
   epochMs: number;
   summary: string;
@@ -103,6 +105,16 @@ function formatActivitySummary(event: NativeActivityEventDto): string {
     : `${event.topic}`;
 }
 
+function filterRowsByKind(rows: EventConsoleRow[], eventFilter: EventFilter): EventConsoleRow[] {
+  if (eventFilter === 'detections') {
+    return rows.filter((row) => row.kind === 'detection');
+  }
+  if (eventFilter === 'activity') {
+    return rows.filter((row) => row.kind === 'activity');
+  }
+  return rows;
+}
+
 const SpectrumLab: React.FC = () => {
   const [searchParams] = useSearchParams();
   const [selectedRadios, setSelectedRadios] = useState<string[]>([]);
@@ -111,6 +123,7 @@ const SpectrumLab: React.FC = () => {
   const [horizontalMarkers, setHorizontalMarkers] = useState<SpectrumHorizontalMarker[]>([]);
   const [horizontalMarkerInput, setHorizontalMarkerInput] = useState('');
   const [eventFilter, setEventFilter] = useState<EventFilter>('all');
+  const [eventTypeFilter, setEventTypeFilter] = useState<string>(ALL_EVENT_TYPES);
   const [isClearingEvents, setIsClearingEvents] = useState(false);
   const [layerOpacities, setLayerOpacities] = useState<Record<string, number>>({});
   const [isStreaming, setIsStreaming] = useState(false);
@@ -140,10 +153,11 @@ const SpectrumLab: React.FC = () => {
     retry: 2,
   });
 
-  const eventRows = useMemo(() => {
+  const rawEventRows = useMemo(() => {
     const detectionRows: EventConsoleRow[] = (eventsPayload?.detections || []).map((event) => ({
       id: `d:${event.eventId}`,
       kind: 'detection',
+      eventType: event.type || 'unknown_detection',
       ts: event.detectedAt,
       epochMs: toEpoch(event.detectedAt),
       summary: formatDetectionSummary(event),
@@ -152,23 +166,35 @@ const SpectrumLab: React.FC = () => {
     const activityRows: EventConsoleRow[] = (eventsPayload?.nativeActivity || []).map((event, idx) => ({
       id: `a:${event.ts}:${event.topic}:${idx}`,
       kind: 'activity',
+      eventType: event.topic || 'unknown_activity',
       ts: event.ts,
       epochMs: toEpoch(event.ts),
       summary: formatActivitySummary(event),
     }));
 
-    const merged = [...detectionRows, ...activityRows]
+    return [...detectionRows, ...activityRows]
       .sort((a, b) => b.epochMs - a.epochMs)
       .slice(0, EVENT_ROWS_LIMIT);
+  }, [eventsPayload]);
 
-    if (eventFilter === 'detections') {
-      return merged.filter((row) => row.kind === 'detection');
+  const eventTypeOptions = useMemo(() => {
+    const visibleByKind = filterRowsByKind(rawEventRows, eventFilter);
+    return Array.from(new Set(visibleByKind.map((row) => row.eventType))).sort((a, b) => a.localeCompare(b));
+  }, [rawEventRows, eventFilter]);
+
+  useEffect(() => {
+    if (eventTypeFilter !== ALL_EVENT_TYPES && !eventTypeOptions.includes(eventTypeFilter)) {
+      setEventTypeFilter(ALL_EVENT_TYPES);
     }
-    if (eventFilter === 'activity') {
-      return merged.filter((row) => row.kind === 'activity');
+  }, [eventTypeFilter, eventTypeOptions]);
+
+  const eventRows = useMemo(() => {
+    const visibleByKind = filterRowsByKind(rawEventRows, eventFilter);
+    if (eventTypeFilter === ALL_EVENT_TYPES) {
+      return visibleByKind;
     }
-    return merged;
-  }, [eventsPayload, eventFilter]);
+    return visibleByKind.filter((row) => row.eventType === eventTypeFilter);
+  }, [rawEventRows, eventFilter, eventTypeFilter]);
 
   const detectionCount = eventsPayload?.detections?.length ?? 0;
   const nativeActivityCount = eventsPayload?.nativeActivity?.length ?? 0;
@@ -677,6 +703,19 @@ const SpectrumLab: React.FC = () => {
                     <SelectItem value="all">All</SelectItem>
                     <SelectItem value="detections">Detections</SelectItem>
                     <SelectItem value="activity">Native Activity</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={eventTypeFilter} onValueChange={setEventTypeFilter}>
+                  <SelectTrigger className="h-8 w-44">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ALL_EVENT_TYPES}>All Types</SelectItem>
+                    {eventTypeOptions.map((type) => (
+                      <SelectItem key={type} value={type}>
+                        {type}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
                 <Button
