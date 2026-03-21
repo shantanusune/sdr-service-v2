@@ -324,7 +324,7 @@ const SpectrumLab: React.FC = () => {
   // Loading state
   if (isLoading) {
     return (
-      <div className="flex gap-4 h-[calc(100vh-12rem)]">
+      <div className="flex gap-4 items-start">
         <Card className="w-64 shrink-0">
           <CardHeader className="pb-2">
             <Skeleton className="h-5 w-20" />
@@ -345,7 +345,7 @@ const SpectrumLab: React.FC = () => {
   // Error state
   if (error) {
     return (
-      <div className="flex items-center justify-center h-[calc(100vh-12rem)]">
+      <div className="flex items-center justify-center min-h-[50vh]">
         <Card className="p-8 text-center">
           <WifiOff className="h-12 w-12 mx-auto mb-4 text-destructive" />
           <h3 className="font-medium mb-2">Failed to Load Data Sources</h3>
@@ -362,7 +362,7 @@ const SpectrumLab: React.FC = () => {
   }
 
   return (
-    <div className="flex gap-4 h-[calc(100vh-12rem)]">
+    <div className="flex gap-4 items-start">
       {/* Device Selection Panel */}
       <Card className="w-64 shrink-0 flex flex-col">
         <CardHeader className="pb-2">
@@ -429,7 +429,7 @@ const SpectrumLab: React.FC = () => {
       </Card>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col gap-4 min-h-0">
+      <div className="flex-1 flex flex-col gap-4">
         {/* Controls */}
         <Card>
           <CardContent className="pt-4 flex items-center justify-between gap-3">
@@ -582,8 +582,8 @@ const SpectrumLab: React.FC = () => {
         </Card>
 
         {/* Spectrum Chart */}
-        <Card className="flex-1 min-h-0">
-          <CardContent className="pt-4 h-full flex flex-col min-h-0">
+        <Card className="min-h-[520px]">
+          <CardContent className="pt-4 flex flex-col">
             {chartData.length === 0 ? (
               <div className="flex-1 flex items-center justify-center text-muted-foreground">
                 {selectedRadios.length === 0
@@ -642,7 +642,7 @@ const SpectrumLab: React.FC = () => {
         </Card>
 
         {/* Event Console */}
-        <Card className="h-64 shrink-0">
+        <Card className="h-72">
           <CardHeader className="py-3">
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm flex items-center gap-2">
