@@ -65,6 +65,9 @@ Default backend URL: `http://localhost:8090`
 For host deployments, use the launcher + systemd installer:
 
 ```bash
+# Install native dependencies for your OS (HackRF/RTL-SDR/ZeroMQ/toolchain)
+./scripts/install-native-sdr-deps.sh
+
 # Runs native service directly on this machine (Linux/macOS, x86_64/arm64)
 ./scripts/run-native-sdr-host.sh
 
@@ -78,6 +81,11 @@ Useful runner flags:
 - `--skip-build` to run an existing binary without cmake
 - `--dry-run` to print command only
 - `--help-script` to view launcher usage
+
+Dependency installer options:
+
+- `./scripts/install-native-sdr-deps.sh --dry-run`
+- `./scripts/install-native-sdr-deps.sh --no-update`
 
 Key runtime envs (from shell or `/etc/default/sdr-native`):
 

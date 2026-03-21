@@ -22,6 +22,7 @@ Script options:
   --              Treat remaining args as native_sdr args
 
 Examples:
+  ./scripts/install-native-sdr-deps.sh
   ./scripts/run-native-sdr-host.sh
   SDR_DRIVER=auto ./scripts/run-native-sdr-host.sh
   NATIVE_SKIP_BUILD=true ./scripts/run-native-sdr-host.sh -- --help
@@ -123,6 +124,31 @@ if [[ "${PRINT_TARGET}" -eq 1 ]]; then
   exit 0
 fi
 
+DRIVER="${SDR_DRIVER:-auto}"
+if [[ "${DRIVER}" == "auto" ]]; then
+  DRIVER="$(detect_driver_auto)"
+fi
+
+case "${DRIVER}" in
+  hackrf|rtl) ;;
+  *)
+    echo "Unsupported SDR_DRIVER value: ${DRIVER}. Use auto|hackrf|rtl." >&2
+    exit 1
+    ;;
+esac
+
+REQUIRE_DRIVER="${SDR_REQUIRE_DRIVER:-auto}"
+case "${REQUIRE_DRIVER}" in
+  auto)
+    REQUIRE_DRIVER="${DRIVER}"
+    ;;
+  none|hackrf|rtl|both) ;;
+  *)
+    echo "Unsupported SDR_REQUIRE_DRIVER value: ${REQUIRE_DRIVER}. Use auto|none|hackrf|rtl|both." >&2
+    exit 1
+    ;;
+esac
+
 BUILD_DIR="${NATIVE_DIR}/build/${TARGET_TRIPLE}"
 JOBS="${NATIVE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 BINARY="${BUILD_DIR}/native_sdr"
@@ -132,10 +158,11 @@ cd "${BUILD_DIR}"
 
 if [[ "${SKIP_BUILD}" -eq 0 ]]; then
   if ! command -v cmake >/dev/null 2>&1; then
-    echo "cmake not found. Install cmake or run with --skip-build if binary already exists." >&2
+    echo "cmake not found. Install native dependencies via ./scripts/install-native-sdr-deps.sh" >&2
+    echo "Or run with --skip-build if a compatible binary already exists." >&2
     exit 1
   fi
-  cmake ../..
+  cmake -DREQUIRE_DRIVER="${REQUIRE_DRIVER}" ../..
   cmake --build . -j"${JOBS}"
 fi
 
@@ -143,11 +170,6 @@ if [[ ! -x "${BINARY}" ]]; then
   echo "native_sdr binary not found or not executable: ${BINARY}" >&2
   echo "Run without --skip-build after installing build dependencies." >&2
   exit 1
-fi
-
-DRIVER="${SDR_DRIVER:-auto}"
-if [[ "${DRIVER}" == "auto" ]]; then
-  DRIVER="$(detect_driver_auto)"
 fi
 
 DEVICE_ID="${SDR_DEVICE_ID:-${DRIVER}_0}"
@@ -188,6 +210,7 @@ if [[ ${#PASSTHROUGH_ARGS[@]} -gt 0 ]]; then
 fi
 
 echo "OS/ARCH target: ${TARGET_TRIPLE}"
+echo "Driver: ${DRIVER} (cmake require=${REQUIRE_DRIVER})"
 echo "Launching native_sdr: ${args[*]}"
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then

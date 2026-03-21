@@ -39,6 +39,7 @@ Use the project launcher to run native capture as a host-native service:
 
 ```bash
 cd ..
+./scripts/install-native-sdr-deps.sh
 ./scripts/run-native-sdr-host.sh
 ```
 
