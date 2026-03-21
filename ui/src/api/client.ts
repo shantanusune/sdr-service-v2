@@ -7,7 +7,10 @@ import type {
   Dashboard,
   Capture,
   AnalysisJob,
-  CaptureRequest 
+  CaptureRequest,
+  RfmlSample,
+  RfmlModel,
+  RfmlTrainResult
 } from '@/models/types';
 import { resolveApiBaseUrl } from '@/config/runtimeEndpoints';
 
@@ -119,6 +122,41 @@ class ApiClient {
     return this.fetch<AnalysisJob>('/api/analysis/jobs', {
       method: 'POST',
       body: JSON.stringify({ captureId, analyses: analyses ?? [] }),
+    });
+  }
+
+  // RFML Lab
+  async getRfmlSamples(): Promise<RfmlSample[]> {
+    if (USE_MOCK_API) return mockData.getRfmlSamples();
+    return this.fetch<RfmlSample[]>('/api/rfml/samples');
+  }
+
+  async labelRfmlSample(captureId: string, label: string, notes: string): Promise<{ status: string; error?: string }> {
+    if (USE_MOCK_API) return mockData.labelRfmlSample(captureId, label, notes);
+    return this.fetch<{ status: string; error?: string }>('/api/rfml/labels', {
+      method: 'POST',
+      body: JSON.stringify({ captureId, label, notes }),
+    });
+  }
+
+  async trainRfmlModel(req?: { epochs?: number; learningRate?: number; l2?: number; autoLoad?: boolean }): Promise<RfmlTrainResult> {
+    if (USE_MOCK_API) return mockData.trainRfmlModel(req);
+    return this.fetch<RfmlTrainResult>('/api/rfml/train', {
+      method: 'POST',
+      body: JSON.stringify(req ?? {}),
+    });
+  }
+
+  async getRfmlModels(): Promise<RfmlModel[]> {
+    if (USE_MOCK_API) return mockData.getRfmlModels();
+    return this.fetch<RfmlModel[]>('/api/rfml/models');
+  }
+
+  async loadRfmlModel(modelPath: string): Promise<{ status: string; error?: string }> {
+    if (USE_MOCK_API) return mockData.loadRfmlModel(modelPath);
+    return this.fetch<{ status: string; error?: string }>('/api/rfml/models/load', {
+      method: 'POST',
+      body: JSON.stringify({ modelPath }),
     });
   }
 }
@@ -261,6 +299,110 @@ const mockData = {
       },
     },
   }),
+
+  getRfmlSamples: (): RfmlSample[] => [
+    {
+      captureId: 'cap-001',
+      deviceId: 'rtl_0',
+      timestamp: Date.now() - 3600000,
+      duration: 5,
+      status: 'complete',
+      sampledFrames: 144,
+      dominantLabel: 'wifi_control_link',
+      label: 'wifi_control_link',
+      notes: 'Home WiFi baseline',
+      updatedAt: Date.now() - 3500000,
+      featureVector: {
+        avgAbsEnergy: 0.24,
+        powerVariance: 0.018,
+        zeroCrossingRate: 0.29,
+        spectralFlatness: 0.61,
+        occupiedBandwidthHz: 18000000,
+        peakToMeanDb: 6.2,
+        peakFreqHz: 2437000000,
+        centerFreqHz: 2437000000,
+        hopDeltaHz: 230000,
+        hopRateHzPerSec: 16000,
+        staticWifiScore: 0.72,
+        staticDroneScore: 0.34,
+        staticControlLinkScore: 0.68,
+        staticDigitalVideoScore: 0.52,
+        staticFhssScore: 0.28,
+      },
+    },
+    {
+      captureId: 'cap-002',
+      deviceId: 'hackrf_0',
+      timestamp: Date.now() - 3000000,
+      duration: 10,
+      status: 'complete',
+      sampledFrames: 231,
+      dominantLabel: 'digital_video_link',
+      label: null,
+      notes: '',
+      updatedAt: 0,
+      featureVector: {
+        avgAbsEnergy: 0.31,
+        powerVariance: 0.011,
+        zeroCrossingRate: 0.33,
+        spectralFlatness: 0.68,
+        occupiedBandwidthHz: 22000000,
+        peakToMeanDb: 5.1,
+        peakFreqHz: 5786000000,
+        centerFreqHz: 5786000000,
+        hopDeltaHz: 110000,
+        hopRateHzPerSec: 4200,
+        staticWifiScore: 0.49,
+        staticDroneScore: 0.41,
+        staticControlLinkScore: 0.35,
+        staticDigitalVideoScore: 0.73,
+        staticFhssScore: 0.24,
+      },
+    },
+  ],
+
+  labelRfmlSample: (captureId: string, label: string, notes: string): { status: string; error?: string } => {
+    console.log('[Mock] label rfml sample', captureId, label, notes);
+    return { status: 'ok' };
+  },
+
+  trainRfmlModel: (_req?: { epochs?: number; learningRate?: number; l2?: number; autoLoad?: boolean }): RfmlTrainResult => ({
+    status: 'ok',
+    modelId: `rfml-${Date.now()}`,
+    modelVersion: `rfml-prototype-${Date.now()}`,
+    modelPath: '/tmp/rfml-prototype.json',
+    trainSamples: 24,
+    classCounts: {
+      wifi_control_link: 10,
+      digital_video_link: 6,
+      fhss_control_suspected: 4,
+      drone_iq_activity: 2,
+      rf_band_activity: 2,
+    },
+    epochs: 300,
+    learningRate: 0.12,
+    l2: 0.0001,
+    trainAccuracy: 0.833,
+    trainLoss: 0.7421,
+    autoLoad: true,
+  }),
+
+  getRfmlModels: (): RfmlModel[] => [
+    {
+      modelId: 'rfml-1001',
+      modelVersion: 'rfml-prototype-1001',
+      modelPath: '/tmp/rfml-1001.json',
+      createdAt: Date.now() - 120000,
+      trainSamples: 24,
+      trainAccuracy: 0.833,
+      trainLoss: 0.7421,
+    },
+  ],
+
+  loadRfmlModel: (modelPath: string): { status: string; error?: string } => {
+    console.log('[Mock] load rfml model', modelPath);
+    return { status: 'ok' };
+  },
 };
 
 export const apiClient = new ApiClient();

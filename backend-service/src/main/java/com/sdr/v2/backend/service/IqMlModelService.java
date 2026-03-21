@@ -7,7 +7,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -90,6 +89,63 @@ public class IqMlModelService {
         loadModelRuntime();
     }
 
+    public List<String> supportedLabels() {
+        return List.of(LABELS);
+    }
+
+    public double[] projectFeatures(FeatureVector vector) {
+        KnownChannelMatch known = nearestKnownChannelMatch(
+                vector.centerFreqHz(),
+                vector.peakFreqHz(),
+                props.getDetection().getMl().getKnownChannelToleranceHz()
+        );
+        return buildFeatures(vector, known);
+    }
+
+    public ModelInfo currentModel() {
+        ModelRuntime runtime = modelRuntime;
+        return new ModelInfo(runtime.version(), runtime.source(), props.getDetection().getMl().getModelPath());
+    }
+
+    public synchronized ModelLoadResult loadModelFromPath(String modelPath) {
+        String requestedPath = modelPath == null ? "" : modelPath.trim();
+        if (requestedPath.isBlank()) {
+            props.getDetection().getMl().setModelPath("");
+            modelRuntime = defaultRuntime();
+            ModelRuntime runtime = modelRuntime;
+            return new ModelLoadResult(true, runtime.version(), runtime.source(), "", null);
+        }
+
+        Path resolvedPath = Path.of(requestedPath).toAbsolutePath().normalize();
+        if (!Files.isRegularFile(resolvedPath)) {
+            return new ModelLoadResult(
+                    false,
+                    modelRuntime.version(),
+                    modelRuntime.source(),
+                    resolvedPath.toString(),
+                    "model file not found"
+            );
+        }
+
+        try {
+            ModelArtifact artifact = objectMapper.readValue(resolvedPath.toFile(), ModelArtifact.class);
+            ModelRuntime runtime = toRuntime(artifact, resolvedPath.toString());
+            props.getDetection().getMl().setModelPath(resolvedPath.toString());
+            modelRuntime = runtime;
+            log.info("Loaded IQ ML model from {} version={}", resolvedPath, runtime.version());
+            return new ModelLoadResult(true, runtime.version(), runtime.source(), resolvedPath.toString(), null);
+        } catch (Exception e) {
+            log.warn("Failed to load IQ ML model from {}: {}", resolvedPath, e.getMessage());
+            return new ModelLoadResult(
+                    false,
+                    modelRuntime.version(),
+                    modelRuntime.source(),
+                    resolvedPath.toString(),
+                    e.getMessage()
+            );
+        }
+    }
+
     public MlInference infer(FeatureVector vector) {
         ModelRuntime runtime = modelRuntime;
         KnownChannelMatch known = nearestKnownChannelMatch(
@@ -97,41 +153,7 @@ public class IqMlModelService {
                 vector.peakFreqHz(),
                 props.getDetection().getMl().getKnownChannelToleranceHz()
         );
-
-        double bandwidthMHz = vector.occupiedBandwidthHz() / 1_000_000.0;
-        double energyScore = clamp01((vector.avgAbsEnergy() - 0.10) / 0.55);
-        double flatnessScore = clamp01((vector.spectralFlatness() - 0.25) / 0.55);
-        double zcrScore = clamp01((vector.zeroCrossingRate() - 0.15) / 0.50);
-        double burstScore = clamp01(vector.powerVariance() / 0.20);
-        double toneScore = clamp01((vector.peakToMeanDb() - 4.0) / 12.0);
-
-        double narrowBandwidthScore = clamp01((10.0 - bandwidthMHz) / 10.0);
-        double wideBandwidthScore = clamp01((bandwidthMHz - 9.0) / 24.0);
-        double hopDeltaScore = clamp01((vector.hopDeltaHz() - 250_000.0) / 4_000_000.0);
-        double hopRateScore = clamp01((vector.hopRateHzPerSec() - 150_000.0) / 3_000_000.0);
-        double channelPriorScore = known.isNearKnownChannel() ? 1.0 : 0.0;
-        double in24Band = inRange(vector.centerFreqHz(), 2_400_000_000L, 2_483_500_000L) ? 1.0 : 0.0;
-        double in5Band = inRange(vector.centerFreqHz(), 5_100_000_000L, 5_950_000_000L) ? 1.0 : 0.0;
-
-        double[] features = new double[FEATURE_COUNT];
-        features[F_IN24_BAND] = in24Band;
-        features[F_IN5_BAND] = in5Band;
-        features[F_CHANNEL_PRIOR] = channelPriorScore;
-        features[F_CONTROL_BW_CLOSENESS] = closenessScore(bandwidthMHz, 7.0, 6.0);
-        features[F_WIDE_BW] = wideBandwidthScore;
-        features[F_NARROW_BW] = narrowBandwidthScore;
-        features[F_FLATNESS] = flatnessScore;
-        features[F_ZCR] = zcrScore;
-        features[F_ENERGY] = energyScore;
-        features[F_BURST] = burstScore;
-        features[F_TONE] = toneScore;
-        features[F_HOP_DELTA] = hopDeltaScore;
-        features[F_HOP_RATE] = hopRateScore;
-        features[F_STATIC_WIFI] = vector.staticWifiScore();
-        features[F_STATIC_DRONE] = vector.staticDroneScore();
-        features[F_STATIC_CONTROL] = vector.staticControlLinkScore();
-        features[F_STATIC_VIDEO] = vector.staticDigitalVideoScore();
-        features[F_STATIC_FHSS] = vector.staticFhssScore();
+        double[] features = buildFeatures(vector, known);
 
         double[] logits = new double[LABELS.length];
         for (int i = 0; i < LABELS.length; i++) {
@@ -167,6 +189,44 @@ public class IqMlModelService {
                 runtime.version(),
                 runtime.source()
         );
+    }
+
+    private static double[] buildFeatures(FeatureVector vector, KnownChannelMatch known) {
+        double bandwidthMHz = vector.occupiedBandwidthHz() / 1_000_000.0;
+        double energyScore = clamp01((vector.avgAbsEnergy() - 0.10) / 0.55);
+        double flatnessScore = clamp01((vector.spectralFlatness() - 0.25) / 0.55);
+        double zcrScore = clamp01((vector.zeroCrossingRate() - 0.15) / 0.50);
+        double burstScore = clamp01(vector.powerVariance() / 0.20);
+        double toneScore = clamp01((vector.peakToMeanDb() - 4.0) / 12.0);
+
+        double narrowBandwidthScore = clamp01((10.0 - bandwidthMHz) / 10.0);
+        double wideBandwidthScore = clamp01((bandwidthMHz - 9.0) / 24.0);
+        double hopDeltaScore = clamp01((vector.hopDeltaHz() - 250_000.0) / 4_000_000.0);
+        double hopRateScore = clamp01((vector.hopRateHzPerSec() - 150_000.0) / 3_000_000.0);
+        double channelPriorScore = known.isNearKnownChannel() ? 1.0 : 0.0;
+        double in24Band = inRange(vector.centerFreqHz(), 2_400_000_000L, 2_483_500_000L) ? 1.0 : 0.0;
+        double in5Band = inRange(vector.centerFreqHz(), 5_100_000_000L, 5_950_000_000L) ? 1.0 : 0.0;
+
+        double[] features = new double[FEATURE_COUNT];
+        features[F_IN24_BAND] = in24Band;
+        features[F_IN5_BAND] = in5Band;
+        features[F_CHANNEL_PRIOR] = channelPriorScore;
+        features[F_CONTROL_BW_CLOSENESS] = closenessScore(bandwidthMHz, 7.0, 6.0);
+        features[F_WIDE_BW] = wideBandwidthScore;
+        features[F_NARROW_BW] = narrowBandwidthScore;
+        features[F_FLATNESS] = flatnessScore;
+        features[F_ZCR] = zcrScore;
+        features[F_ENERGY] = energyScore;
+        features[F_BURST] = burstScore;
+        features[F_TONE] = toneScore;
+        features[F_HOP_DELTA] = hopDeltaScore;
+        features[F_HOP_RATE] = hopRateScore;
+        features[F_STATIC_WIFI] = vector.staticWifiScore();
+        features[F_STATIC_DRONE] = vector.staticDroneScore();
+        features[F_STATIC_CONTROL] = vector.staticControlLinkScore();
+        features[F_STATIC_VIDEO] = vector.staticDigitalVideoScore();
+        features[F_STATIC_FHSS] = vector.staticFhssScore();
+        return features;
     }
 
     private void loadModelRuntime() {
@@ -443,5 +503,15 @@ public class IqMlModelService {
         public void setWeights(double[][] weights) {
             this.weights = weights;
         }
+    }
+
+    public record ModelInfo(String version, String source, String configuredPath) {
+    }
+
+    public record ModelLoadResult(boolean loaded,
+                                  String version,
+                                  String source,
+                                  String path,
+                                  String error) {
     }
 }

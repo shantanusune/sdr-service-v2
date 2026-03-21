@@ -16,12 +16,14 @@ public class LegacyUiService {
 
     private final RegistryStateService registry;
     private final RawLabCaptureService rawLab;
+    private final RfmlLabService rfmlLab;
 
     private final CopyOnWriteArrayList<Map<String, Object>> dashboards = new CopyOnWriteArrayList<>();
 
-    public LegacyUiService(RegistryStateService registry, RawLabCaptureService rawLab) {
+    public LegacyUiService(RegistryStateService registry, RawLabCaptureService rawLab, RfmlLabService rfmlLab) {
         this.registry = registry;
         this.rawLab = rawLab;
+        this.rfmlLab = rfmlLab;
         seedDefaults();
     }
 
@@ -151,6 +153,26 @@ public class LegacyUiService {
 
     public Map<String, Object> createAnalysisJob(Map<String, Object> request) {
         return rawLab.createAnalysisJob(request);
+    }
+
+    public List<Map<String, Object>> listRfmlSamples() {
+        return rfmlLab.listSamples();
+    }
+
+    public Map<String, Object> labelRfmlSample(Map<String, Object> request) {
+        return rfmlLab.labelCapture(request);
+    }
+
+    public Map<String, Object> trainRfmlModel(Map<String, Object> request) {
+        return rfmlLab.trainModel(request);
+    }
+
+    public List<Map<String, Object>> listRfmlModels() {
+        return rfmlLab.listModels();
+    }
+
+    public Map<String, Object> loadRfmlModel(Map<String, Object> request) {
+        return rfmlLab.loadModel(request);
     }
 
     private void seedDefaults() {

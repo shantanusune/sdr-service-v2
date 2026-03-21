@@ -39,6 +39,14 @@ Events and health:
 - `DELETE /api/events`
 - `GET /health`
 
+RFML lab:
+
+- `GET /api/rfml/samples` (list completed captures with extracted feature vectors)
+- `POST /api/rfml/labels` (annotate capture with label + notes)
+- `POST /api/rfml/train` (train prototype softmax model and export artifact)
+- `GET /api/rfml/models` (list trained model artifacts from current runtime)
+- `POST /api/rfml/models/load` (load artifact into active IQ detector)
+
 Streaming:
 
 - `WS /ws/stream/{machineIp}/{deviceId}/spectrum`
@@ -81,3 +89,16 @@ ML model inference fields in event evidence:
 
 Model file template:
 - `config/iq-ml-model-template.json`
+
+## RFML Prototype Flow
+
+1. Capture IQ in Raw Lab (`POST /api/captures`).
+2. Analyze capture and generate summary metrics (`POST /api/analysis/jobs`).
+3. Label samples (`POST /api/rfml/labels`) with one of:
+   - `wifi_control_link`
+   - `digital_video_link`
+   - `fhss_control_suspected`
+   - `drone_iq_activity`
+   - `rf_band_activity`
+4. Train model (`POST /api/rfml/train`), which writes a model artifact under `./data/ml-models`.
+5. Load artifact into active detection (`POST /api/rfml/models/load`) or train with auto-load.

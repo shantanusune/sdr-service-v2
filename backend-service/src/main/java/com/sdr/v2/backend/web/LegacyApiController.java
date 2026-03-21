@@ -75,4 +75,29 @@ public class LegacyApiController {
     public Map<String, Object> createAnalysis(@RequestBody Map<String, Object> req) {
         return legacy.createAnalysisJob(req);
     }
+
+    @GetMapping("/rfml/samples")
+    public List<Map<String, Object>> rfmlSamples() {
+        return legacy.listRfmlSamples();
+    }
+
+    @PostMapping("/rfml/labels")
+    public Map<String, Object> labelRfmlSample(@RequestBody Map<String, Object> req) {
+        return legacy.labelRfmlSample(req);
+    }
+
+    @PostMapping("/rfml/train")
+    public Map<String, Object> trainRfmlModel(@RequestBody(required = false) Map<String, Object> req) {
+        return legacy.trainRfmlModel(req == null ? Map.of() : req);
+    }
+
+    @GetMapping("/rfml/models")
+    public List<Map<String, Object>> rfmlModels() {
+        return legacy.listRfmlModels();
+    }
+
+    @PostMapping("/rfml/models/load")
+    public Map<String, Object> loadRfmlModel(@RequestBody Map<String, Object> req) {
+        return legacy.loadRfmlModel(req);
+    }
 }

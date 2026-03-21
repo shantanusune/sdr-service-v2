@@ -170,6 +170,64 @@ export interface AnalysisResult {
   }[];
 }
 
+export interface RfmlFeatureVector {
+  avgAbsEnergy: number;
+  powerVariance: number;
+  zeroCrossingRate: number;
+  spectralFlatness: number;
+  occupiedBandwidthHz: number;
+  peakToMeanDb: number;
+  peakFreqHz: number;
+  centerFreqHz: number;
+  hopDeltaHz: number;
+  hopRateHzPerSec: number;
+  staticWifiScore: number;
+  staticDroneScore: number;
+  staticControlLinkScore: number;
+  staticDigitalVideoScore: number;
+  staticFhssScore: number;
+}
+
+export interface RfmlSample {
+  captureId: string;
+  deviceId: string;
+  timestamp: number;
+  duration: number;
+  status: string;
+  sampledFrames: number;
+  dominantLabel: string;
+  featureVector: Partial<RfmlFeatureVector>;
+  label: string | null;
+  notes: string;
+  updatedAt: number;
+}
+
+export interface RfmlModel {
+  modelId: string;
+  modelVersion: string;
+  modelPath: string;
+  createdAt: number;
+  trainSamples: number;
+  trainAccuracy: number;
+  trainLoss: number;
+}
+
+export interface RfmlTrainResult {
+  status: string;
+  modelId?: string;
+  modelVersion?: string;
+  modelPath?: string;
+  trainSamples?: number;
+  classCounts?: Record<string, number>;
+  epochs?: number;
+  learningRate?: number;
+  l2?: number;
+  trainAccuracy?: number;
+  trainLoss?: number;
+  autoLoad?: boolean;
+  error?: string;
+}
+
 // Peak detection
 export interface Peak {
   deviceId: string;

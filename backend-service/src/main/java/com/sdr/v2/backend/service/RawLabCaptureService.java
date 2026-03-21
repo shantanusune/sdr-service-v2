@@ -130,6 +130,86 @@ public class RawLabCaptureService {
         );
     }
 
+    public synchronized Map<String, Object> getCaptureFeatureSnapshot(String captureId) {
+        finalizeExpiredLocked(System.currentTimeMillis());
+        CaptureRecord c = capturesById.get(captureId);
+        if (c == null) {
+            return Map.of(
+                    "captureId", captureId,
+                    "status", "missing",
+                    "error", "capture not found"
+            );
+        }
+        if (c.summaries.isEmpty()) {
+            return Map.of(
+                    "captureId", captureId,
+                    "status", c.status,
+                    "error", "capture has no IQ summaries"
+            );
+        }
+
+        List<FrameSummary> frames = c.summaries;
+        HopStats hop = computeHopStats(frames);
+
+        double avgAbsEnergy = frames.stream().mapToDouble(FrameSummary::avgAbs).average().orElse(0.0);
+        double avgPowerVariance = frames.stream().mapToDouble(FrameSummary::powerVariance).average().orElse(0.0);
+        double avgZeroCrossRate = frames.stream().mapToDouble(FrameSummary::zeroCrossRate).average().orElse(0.0);
+        double avgSpectralFlatness = frames.stream().mapToDouble(FrameSummary::spectralFlatness).average().orElse(0.0);
+        double avgOccupiedBandwidthHz = frames.stream().mapToDouble(FrameSummary::occupiedBandwidthHz).average().orElse(0.0);
+        double avgPeakToMeanDb = frames.stream().mapToDouble(FrameSummary::peakToMeanDb).average().orElse(0.0);
+        long peakFreqHz = Math.round(frames.stream().mapToLong(FrameSummary::peakFreqHz).average().orElse(0.0));
+        long centerFreqHz = Math.round(frames.stream().mapToLong(FrameSummary::centerFreqHz).average().orElse(0.0));
+        double hopDeltaHz = hop.avgHopHz();
+        double hopRateHzPerSec = (hop.hopRatePerMinute() / 60.0) * Math.max(0.0, hop.avgHopHz());
+
+        double burstRatio = computeBurstRatio(frames);
+        ProtocolHint hint = inferProtocolHint(frames, burstRatio, hop, avgSpectralFlatness, avgOccupiedBandwidthHz);
+
+        double staticControlScore = hint.controlLinkScore();
+        double staticVideoScore = hint.digitalVideoScore();
+        double staticFhssScore = hint.fhssScore();
+        double staticWifiScore = clamp01(Math.max(staticControlScore, staticVideoScore));
+
+        double narrowbandScore = clamp01((8_000_000.0 - avgOccupiedBandwidthHz) / 8_000_000.0);
+        double toneScore = clamp01((avgPeakToMeanDb - 4.0) / 10.0);
+        double burstScore = clamp01(avgPowerVariance / 0.18);
+        double energyScore = clamp01((avgAbsEnergy - 0.08) / 0.35);
+        double staticDroneScore = clamp01(
+                (0.35 * narrowbandScore)
+                        + (0.30 * toneScore)
+                        + (0.20 * energyScore)
+                        + (0.15 * burstScore)
+        );
+        if (hint.in24GHzBand() && staticWifiScore > 0.62) {
+            staticDroneScore *= 0.75;
+        }
+
+        LinkedHashMap<String, Object> out = new LinkedHashMap<>();
+        out.put("captureId", c.captureId);
+        out.put("deviceId", c.deviceId);
+        out.put("status", c.status);
+        out.put("sampledFrames", frames.size());
+        out.put("dominantLabel", hint.label());
+        LinkedHashMap<String, Object> featureVector = new LinkedHashMap<>();
+        featureVector.put("avgAbsEnergy", round6(avgAbsEnergy));
+        featureVector.put("powerVariance", round6(avgPowerVariance));
+        featureVector.put("zeroCrossingRate", round6(avgZeroCrossRate));
+        featureVector.put("spectralFlatness", round6(avgSpectralFlatness));
+        featureVector.put("occupiedBandwidthHz", round1(avgOccupiedBandwidthHz));
+        featureVector.put("peakToMeanDb", round4(avgPeakToMeanDb));
+        featureVector.put("peakFreqHz", peakFreqHz);
+        featureVector.put("centerFreqHz", centerFreqHz);
+        featureVector.put("hopDeltaHz", round1(hopDeltaHz));
+        featureVector.put("hopRateHzPerSec", round1(hopRateHzPerSec));
+        featureVector.put("staticWifiScore", round4(staticWifiScore));
+        featureVector.put("staticDroneScore", round4(staticDroneScore));
+        featureVector.put("staticControlLinkScore", round4(staticControlScore));
+        featureVector.put("staticDigitalVideoScore", round4(staticVideoScore));
+        featureVector.put("staticFhssScore", round4(staticFhssScore));
+        out.put("featureVector", featureVector);
+        return out;
+    }
+
     public synchronized void onIqFrame(RawIqFrame frame) {
         if (frame == null || frame.payload() == null || frame.payload().length < 2) {
             return;
@@ -532,6 +612,16 @@ public class RawLabCaptureService {
         }
 
         return new ProtocolHint(label, confidence, controlLinkScore, digitalVideoScore, fhssScore, unknownScore, in24Band);
+    }
+
+    private static double computeBurstRatio(List<FrameSummary> frames) {
+        if (frames.isEmpty()) {
+            return 0.0;
+        }
+        double baselineRms = percentile(frames.stream().mapToDouble(FrameSummary::rms).sorted().toArray(), 0.25);
+        double burstThreshold = Math.max(1e-9, baselineRms * 1.8);
+        long burstFrames = frames.stream().filter(f -> f.rms() >= burstThreshold).count();
+        return (double) burstFrames / frames.size();
     }
 
     private static List<Map<String, Object>> detectBands(List<FrameSummary> frames, String labelPrefix) {
