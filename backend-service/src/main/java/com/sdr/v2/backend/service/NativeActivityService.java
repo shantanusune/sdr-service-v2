@@ -21,4 +21,10 @@ public class NativeActivityService {
     public synchronized List<NativeActivityEvent> list() {
         return List.copyOf(nativeEvents);
     }
+
+    public synchronized int clear() {
+        int cleared = nativeEvents.size();
+        nativeEvents.clear();
+        return cleared;
+    }
 }

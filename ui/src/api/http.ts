@@ -1,6 +1,7 @@
 import { getKeycloak } from '@/auth/keycloak';
+import { resolveApiBaseUrl } from '@/config/runtimeEndpoints';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8090';
+const API_BASE_URL = resolveApiBaseUrl();
 const USE_MOCK_AUTH = import.meta.env.VITE_MOCK_AUTH === 'true';
 
 export interface FetchOptions extends RequestInit {

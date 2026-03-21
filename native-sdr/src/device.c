@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifdef HAVE_RTLSDR
 #include <rtl-sdr.h>
@@ -54,6 +55,34 @@ static void* rtlsdr_thread_main(void* arg) {
 #endif
 
 #ifdef HAVE_HACKRF
+static int hackrf_open_with_retry(const sdr_device_config_t* cfg, hackrf_device** out_dev) {
+  if (!cfg || !out_dev) {
+    return HACKRF_ERROR_INVALID_PARAM;
+  }
+
+  const int max_attempts = 8;
+  const useconds_t retry_delay_us = 250000;
+
+  int rc = HACKRF_ERROR_OTHER;
+  for (int attempt = 1; attempt <= max_attempts; attempt++) {
+    if (cfg->serial[0] != '\0') {
+      rc = hackrf_open_by_serial(cfg->serial, out_dev);
+    } else {
+      rc = hackrf_open(out_dev);
+    }
+
+    if (rc == HACKRF_SUCCESS) {
+      return rc;
+    }
+
+    if (attempt < max_attempts) {
+      usleep(retry_delay_us);
+    }
+  }
+
+  return rc;
+}
+
 static int hackrf_cb(hackrf_transfer* transfer) {
   sdr_device_handle_t* h = (sdr_device_handle_t*)transfer->rx_ctx;
   if (!h || !transfer || !transfer->buffer || transfer->valid_length <= 0) return 0;
@@ -120,32 +149,71 @@ int sdr_device_start(const sdr_device_config_t* cfg,
       free(h);
       return -1;
     }
-    int rc;
-    if (cfg->serial[0] != '\0') {
-      rc = hackrf_open_by_serial(cfg->serial, &h->hackrf);
-    } else {
-      rc = hackrf_open(&h->hackrf);
-    }
+
+    int rc = hackrf_open_with_retry(cfg, &h->hackrf);
     if (rc != HACKRF_SUCCESS) {
       hackrf_exit();
-      set_error("hackrf_open failed");
+      snprintf(g_last_error,
+               sizeof(g_last_error),
+               "hackrf_open failed (%s)",
+               hackrf_error_name(rc));
       free(h);
       return -1;
     }
 
-    hackrf_set_sample_rate(h->hackrf, (double)cfg->sample_rate_hz);
-    hackrf_set_freq(h->hackrf, cfg->center_freq_hz);
+    rc = hackrf_set_sample_rate(h->hackrf, (double)cfg->sample_rate_hz);
+    if (rc != HACKRF_SUCCESS) {
+      hackrf_close(h->hackrf);
+      h->hackrf = NULL;
+      hackrf_exit();
+      snprintf(g_last_error,
+               sizeof(g_last_error),
+               "hackrf_set_sample_rate failed (%s)",
+               hackrf_error_name(rc));
+      free(h);
+      return -1;
+    }
+
+    rc = hackrf_set_freq(h->hackrf, cfg->center_freq_hz);
+    if (rc != HACKRF_SUCCESS) {
+      hackrf_close(h->hackrf);
+      h->hackrf = NULL;
+      hackrf_exit();
+      snprintf(g_last_error,
+               sizeof(g_last_error),
+               "hackrf_set_freq failed (%s)",
+               hackrf_error_name(rc));
+      free(h);
+      return -1;
+    }
+
     if (cfg->gain_db > 0) {
       int vga = cfg->gain_db;
       if (vga < 0) vga = 0;
       if (vga > 62) vga = 62;
-      hackrf_set_vga_gain(h->hackrf, (uint32_t)vga);
+      rc = hackrf_set_vga_gain(h->hackrf, (uint32_t)vga);
+      if (rc != HACKRF_SUCCESS) {
+        hackrf_close(h->hackrf);
+        h->hackrf = NULL;
+        hackrf_exit();
+        snprintf(g_last_error,
+                 sizeof(g_last_error),
+                 "hackrf_set_vga_gain failed (%s)",
+                 hackrf_error_name(rc));
+        free(h);
+        return -1;
+      }
     }
 
-    if (hackrf_start_rx(h->hackrf, hackrf_cb, h) != HACKRF_SUCCESS) {
+    rc = hackrf_start_rx(h->hackrf, hackrf_cb, h);
+    if (rc != HACKRF_SUCCESS) {
       hackrf_close(h->hackrf);
+      h->hackrf = NULL;
       hackrf_exit();
-      set_error("hackrf_start_rx failed");
+      snprintf(g_last_error,
+               sizeof(g_last_error),
+               "hackrf_start_rx failed (%s)",
+               hackrf_error_name(rc));
       free(h);
       return -1;
     }
@@ -178,8 +246,12 @@ void sdr_device_stop(sdr_device_handle_t* h) {
 #ifdef HAVE_HACKRF
     if (h->hackrf) {
       hackrf_stop_rx(h->hackrf);
+      if (h->cfg && h->cfg->hackrf_reset_on_stop) {
+        hackrf_reset(h->hackrf);
+      }
       hackrf_close(h->hackrf);
       h->hackrf = NULL;
+      usleep(100000);
       hackrf_exit();
     }
 #endif

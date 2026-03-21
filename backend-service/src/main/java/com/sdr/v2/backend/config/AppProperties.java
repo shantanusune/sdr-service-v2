@@ -89,6 +89,11 @@ public class AppProperties {
         private boolean iqEnabled = true;
         private double detectionThreshold = 0.22;
         private long detectionCooldownMs = 5000;
+        private boolean iqDumpEnabled = true;
+        private String iqDumpDir = "./data/iq-dumps";
+        private int iqDumpMaxBytes = 131072;
+        private int iqDumpMaxFiles = 2000;
+        private final Ml ml = new Ml();
         private List<String> bands = new ArrayList<>(List.of(
                 "433000000-435000000",
                 "863000000-928000000",
@@ -120,12 +125,87 @@ public class AppProperties {
             this.detectionCooldownMs = detectionCooldownMs;
         }
 
+        public boolean isIqDumpEnabled() {
+            return iqDumpEnabled;
+        }
+
+        public void setIqDumpEnabled(boolean iqDumpEnabled) {
+            this.iqDumpEnabled = iqDumpEnabled;
+        }
+
+        public String getIqDumpDir() {
+            return iqDumpDir;
+        }
+
+        public void setIqDumpDir(String iqDumpDir) {
+            this.iqDumpDir = iqDumpDir;
+        }
+
+        public int getIqDumpMaxBytes() {
+            return iqDumpMaxBytes;
+        }
+
+        public void setIqDumpMaxBytes(int iqDumpMaxBytes) {
+            this.iqDumpMaxBytes = iqDumpMaxBytes;
+        }
+
+        public int getIqDumpMaxFiles() {
+            return iqDumpMaxFiles;
+        }
+
+        public void setIqDumpMaxFiles(int iqDumpMaxFiles) {
+            this.iqDumpMaxFiles = iqDumpMaxFiles;
+        }
+
+        public Ml getMl() {
+            return ml;
+        }
+
         public List<String> getBands() {
             return bands;
         }
 
         public void setBands(List<String> bands) {
             this.bands = (bands == null) ? new ArrayList<>() : bands;
+        }
+
+        public static class Ml {
+            private boolean enabled = true;
+            private double blend = 0.45;
+            private double overrideThreshold = 0.78;
+            private long knownChannelToleranceHz = 12_000_000L;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public double getBlend() {
+                return blend;
+            }
+
+            public void setBlend(double blend) {
+                this.blend = blend;
+            }
+
+            public double getOverrideThreshold() {
+                return overrideThreshold;
+            }
+
+            public void setOverrideThreshold(double overrideThreshold) {
+                this.overrideThreshold = overrideThreshold;
+            }
+
+            public long getKnownChannelToleranceHz() {
+                return knownChannelToleranceHz;
+            }
+
+            public void setKnownChannelToleranceHz(long knownChannelToleranceHz) {
+                this.knownChannelToleranceHz = knownChannelToleranceHz;
+            }
         }
     }
 

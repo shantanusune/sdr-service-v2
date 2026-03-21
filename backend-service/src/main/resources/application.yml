@@ -28,11 +28,20 @@ app:
     iq-enabled: ${APP_DETECTION_IQ_ENABLED:true}
     detection-threshold: ${APP_DETECTION_THRESHOLD:0.22}
     detection-cooldown-ms: ${APP_DETECTION_COOLDOWN_MS:5000}
+    iq-dump-enabled: ${APP_DETECTION_IQ_DUMP_ENABLED:true}
+    iq-dump-dir: ${APP_DETECTION_IQ_DUMP_DIR:./data/iq-dumps}
+    iq-dump-max-bytes: ${APP_DETECTION_IQ_DUMP_MAX_BYTES:131072}
+    iq-dump-max-files: ${APP_DETECTION_IQ_DUMP_MAX_FILES:2000}
     bands:
       - ${APP_DETECTION_BAND_1:433000000-435000000}
       - ${APP_DETECTION_BAND_2:863000000-928000000}
       - ${APP_DETECTION_BAND_3:2400000000-2483500000}
       - ${APP_DETECTION_BAND_4:5725000000-5875000000}
+    ml:
+      enabled: ${APP_DETECTION_ML_ENABLED:true}
+      blend: ${APP_DETECTION_ML_BLEND:0.45}
+      override-threshold: ${APP_DETECTION_ML_OVERRIDE_THRESHOLD:0.78}
+      known-channel-tolerance-hz: ${APP_DETECTION_ML_CHANNEL_TOLERANCE_HZ:12000000}
 
   registry:
     offline-after-ms: ${APP_REGISTRY_OFFLINE_AFTER_MS:45000}

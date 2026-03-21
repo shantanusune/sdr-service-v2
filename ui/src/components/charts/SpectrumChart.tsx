@@ -5,10 +5,19 @@ import type { SpectrumFrame } from '@/types/sdr';
 // Support both legacy SpectrumData and new SpectrumFrame types
 type ChartDataItem = SpectrumData | SpectrumFrame;
 
+export interface SpectrumHorizontalMarker {
+  id: string;
+  dbValue: number;
+  label?: string;
+  color?: string;
+}
+
 interface SpectrumChartProps {
   data: ChartDataItem[];
   markers?: SpectrumMarker[];
+  horizontalMarkers?: SpectrumHorizontalMarker[];
   onMarkerAdd?: (frequencyHz: number) => void;
+  onHorizontalMarkerAdd?: (dbValue: number) => void;
   width?: number;
   height?: number;
   showGrid?: boolean;
@@ -77,7 +86,7 @@ function normalizeData(item: ChartDataItem): {
     let peakBin = 0;
     for (let i = 0; i < bins.length; i++) {
       const val = bins[i];
-      if (isFinite(val) && val >= -200 && val <= 50 && val > peakDb) {
+      if (isFinite(val) && val >= -220 && val <= 120 && val > peakDb) {
         peakDb = val;
         peakBin = i;
       }
@@ -98,10 +107,62 @@ function normalizeData(item: ChartDataItem): {
   return null;
 }
 
+function computeDbRange(
+  normalizedData: Array<{
+    bins: number[] | Float32Array;
+  }>,
+  offsets: number[],
+  horizontalMarkers: SpectrumHorizontalMarker[]
+): { minDb: number; maxDb: number; dbRange: number } {
+  let minDb = Number.POSITIVE_INFINITY;
+  let maxDb = Number.NEGATIVE_INFINITY;
+
+  normalizedData.forEach((spectrum, idx) => {
+    const offset = offsets[idx] ?? 0;
+    const { bins } = spectrum;
+
+    for (let i = 0; i < bins.length; i++) {
+      const raw = bins[i];
+      if (!isFinite(raw)) continue;
+      const value = raw + offset;
+      if (value < -220 || value > 120) continue;
+      if (value < minDb) minDb = value;
+      if (value > maxDb) maxDb = value;
+    }
+  });
+
+  horizontalMarkers.forEach((marker) => {
+    if (!isFinite(marker.dbValue)) return;
+    if (marker.dbValue < minDb) minDb = marker.dbValue;
+    if (marker.dbValue > maxDb) maxDb = marker.dbValue;
+  });
+
+  if (!isFinite(minDb) || !isFinite(maxDb)) {
+    minDb = -120;
+    maxDb = 10;
+  }
+
+  // Always keep some positive headroom so +dB values are visible.
+  maxDb = Math.max(maxDb, 10);
+  minDb = Math.min(minDb, -120);
+
+  // Snap to clean 10 dB boundaries.
+  minDb = Math.floor(minDb / 10) * 10;
+  maxDb = Math.ceil(maxDb / 10) * 10;
+
+  if (maxDb - minDb < 20) {
+    maxDb = minDb + 20;
+  }
+
+  return { minDb, maxDb, dbRange: maxDb - minDb };
+}
+
 export const SpectrumChart: React.FC<SpectrumChartProps> = ({
   data,
   markers = [],
+  horizontalMarkers = [],
   onMarkerAdd,
+  onHorizontalMarkerAdd,
   width = 800,
   height = 300,
   showGrid = true,
@@ -134,6 +195,7 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
 
     // Normalize data
     const normalizedData = data.map(normalizeData).filter((d): d is NonNullable<typeof d> => d !== null);
+    const { minDb, maxDb, dbRange } = computeDbRange(normalizedData, offsets, horizontalMarkers);
 
     // Draw grid
     if (showGrid) {
@@ -168,11 +230,6 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
       const opacity = opacities[layerIdx] ?? 0.8;
       const offset = offsets[layerIdx] ?? 0;
 
-      // Determine dB range
-      const minDb = -100;
-      const maxDb = 0;
-      const dbRange = maxDb - minDb;
-
       // Draw spectrum line
       ctx.beginPath();
       ctx.strokeStyle = color;
@@ -206,8 +263,10 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
       // Draw peak marker
       if (showPeaks && spectrum.peakHz !== undefined && spectrum.peakDb !== undefined) {
         const startHz = spectrum.centerHz - spectrum.spanHz / 2;
-        const peakBin = Math.round((spectrum.peakHz - startHz) / spectrum.binHz);
-        
+        const peakBin = spectrum.binHz > 0
+          ? Math.round((spectrum.peakHz - startHz) / spectrum.binHz)
+          : 0;
+
         if (peakBin >= 0 && peakBin < bins.length) {
           const peakX = padding.left + (peakBin / bins.length) * chartWidth;
           const peakDbValue = spectrum.peakDb + offset;
@@ -224,23 +283,23 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
           ctx.font = '10px monospace';
           ctx.fillStyle = 'hsl(0, 84%, 60%)';
           ctx.textAlign = 'center';
-          ctx.fillText(`${spectrum.peakDb.toFixed(1)} dB`, peakX, peakY - 8);
+          ctx.fillText(`${peakDbValue.toFixed(1)} dB`, peakX, peakY - 8);
         }
       }
     });
 
-    // Draw markers
+    // Draw vertical markers
     if (normalizedData.length > 0) {
       const firstSpectrum = normalizedData[0];
-      
+
       markers.forEach(marker => {
         const startHz = firstSpectrum.centerHz - firstSpectrum.spanHz / 2;
         const endHz = firstSpectrum.centerHz + firstSpectrum.spanHz / 2;
         const markerPos = (marker.frequencyHz - startHz) / (endHz - startHz);
-        
+
         if (markerPos >= 0 && markerPos <= 1) {
           const x = padding.left + markerPos * chartWidth;
-          
+
           ctx.strokeStyle = marker.color || 'hsl(38, 92%, 50%)';
           ctx.lineWidth = 2;
           ctx.setLineDash([4, 4]);
@@ -263,16 +322,39 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
       });
     }
 
+    // Draw horizontal dB markers
+    horizontalMarkers.forEach((marker) => {
+      const normalizedDb = (marker.dbValue - minDb) / dbRange;
+      if (normalizedDb < 0 || normalizedDb > 1) return;
+
+      const y = padding.top + chartHeight * (1 - normalizedDb);
+      ctx.strokeStyle = marker.color || 'hsl(187, 96%, 42%)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(width - padding.right, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.font = '10px monospace';
+      ctx.fillStyle = marker.color || 'hsl(187, 96%, 42%)';
+      ctx.textAlign = 'left';
+      ctx.fillText(marker.label || `${marker.dbValue.toFixed(1)} dB`, padding.left + 4, y - 4);
+    });
+
     // Draw axes labels
     ctx.font = '11px monospace';
     ctx.fillStyle = 'hsl(215, 20%, 65%)';
 
-    // Y-axis labels (dB)
+    // Y-axis labels (dB, dynamic with positive support)
     ctx.textAlign = 'right';
-    for (let i = 0; i <= 4; i++) {
-      const db = -100 + (100 * i) / 4;
-      const y = padding.top + chartHeight * (1 - i / 4);
-      ctx.fillText(`${db} dB`, padding.left - 8, y + 4);
+    const yTicks = 6;
+    for (let i = 0; i <= yTicks; i++) {
+      const ratio = i / yTicks;
+      const db = maxDb - dbRange * ratio;
+      const y = padding.top + chartHeight * ratio;
+      ctx.fillText(`${db.toFixed(0)} dB`, padding.left - 8, y + 4);
     }
 
     // X-axis labels (frequency)
@@ -280,7 +362,7 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
       const firstSpectrum = normalizedData[0];
       const startMHz = (firstSpectrum.centerHz - firstSpectrum.spanHz / 2) / 1e6;
       const endMHz = (firstSpectrum.centerHz + firstSpectrum.spanHz / 2) / 1e6;
-      
+
       ctx.textAlign = 'center';
       for (let i = 0; i <= 5; i++) {
         const freq = startMHz + ((endMHz - startMHz) * i) / 5;
@@ -294,7 +376,7 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
       ctx.font = '10px monospace';
       ctx.fillStyle = 'hsl(215, 20%, 65%)';
       ctx.textAlign = 'left';
-      
+
       normalizedData.forEach((spectrum, idx) => {
         const y = 12;
         const x = padding.left + idx * 150;
@@ -303,16 +385,18 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
         ctx.fillStyle = 'hsl(215, 20%, 65%)';
         ctx.fillText(spectrum.deviceId || `Layer ${idx + 1}`, x + 12, y + 2);
       });
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'hsl(215, 20%, 65%)';
+      ctx.fillText(`Scale ${minDb.toFixed(0)}..${maxDb.toFixed(0)} dB`, width - padding.right, 12);
     }
-  }, [data, markers, width, height, showGrid, showPeaks, colors, opacities, offsets]);
+  }, [data, markers, horizontalMarkers, width, height, showGrid, showPeaks, colors, opacities, offsets]);
 
   useEffect(() => {
     drawChart();
   }, [drawChart]);
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!onMarkerAdd) return;
-    
     const normalizedData = data.map(normalizeData).filter((d): d is NonNullable<typeof d> => d !== null);
     if (normalizedData.length === 0) return;
 
@@ -321,9 +405,24 @@ export const SpectrumChart: React.FC<SpectrumChartProps> = ({
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
 
-    const padding = { left: 60, right: 20 };
+    const padding = { top: 20, right: 20, bottom: 40, left: 60 };
     const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+    const { minDb, maxDb, dbRange } = computeDbRange(normalizedData, offsets, horizontalMarkers);
+
+    // Shift+click adds a horizontal dB marker.
+    if (e.shiftKey && onHorizontalMarkerAdd) {
+      const relY = (y - padding.top) / chartHeight;
+      if (relY >= 0 && relY <= 1) {
+        const dbValue = maxDb - relY * dbRange;
+        onHorizontalMarkerAdd(Math.round(dbValue * 10) / 10);
+      }
+      return;
+    }
+
+    if (!onMarkerAdd) return;
 
     const relX = (x - padding.left) / chartWidth;
     if (relX >= 0 && relX <= 1) {

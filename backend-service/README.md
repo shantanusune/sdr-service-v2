@@ -36,6 +36,7 @@ Legacy UI compatibility:
 Events and health:
 
 - `GET /api/events`
+- `DELETE /api/events`
 - `GET /health`
 
 Streaming:
@@ -55,3 +56,19 @@ Streaming:
 - `APP_ZMQ_ENDPOINT` (default `tcp://127.0.0.1:5555`)
 - `APP_SECURITY_AUTH_ENABLED` (`false` by default)
 - `KEYCLOAK_ISSUER_URI` (required only if auth is enabled)
+- `APP_DETECTION_IQ_DUMP_ENABLED` (`true` by default)
+- `APP_DETECTION_IQ_DUMP_DIR` (default `./data/iq-dumps`)
+- `APP_DETECTION_IQ_DUMP_MAX_BYTES` (default `131072`)
+- `APP_DETECTION_IQ_DUMP_MAX_FILES` (default `2000`)
+
+Detection events now include IQ dump metadata in `evidence` when dump is enabled:
+- `iqDumpPath`
+- `iqDumpBytes`
+- `iqFrameBytes`
+- `iqDumpTruncated`
+
+2.4 GHz protocol labeling (heuristic IQ classification) emits detection types:
+- `wifi_control_link`
+- `digital_video_link`
+- `fhss_control_suspected`
+- `unknown_2_4ghz`
