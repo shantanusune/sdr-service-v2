@@ -36,6 +36,12 @@ cmake --build . -j
 ./native_sdr --driver rtl --device-id rtl_0 --index 0 --freq 2400000000 --sr 2560000 --zmq tcp://127.0.0.1:5555
 ```
 
+Or use the OS/ARCH-aware host launcher (builds to `native-sdr/build/<os>-<arch>` and auto-selects driver when `SDR_DRIVER=auto`):
+
+```bash
+./scripts/run-native-sdr-host.sh
+```
+
 2. Start backend:
 
 ```bash
@@ -53,6 +59,38 @@ npm run dev
 ```
 
 Default backend URL: `http://localhost:8090`
+
+## Host Native Service (OS/ARCH Aware)
+
+For host deployments, use the launcher + systemd installer:
+
+```bash
+# Runs native service directly on this machine (Linux/macOS, x86_64/arm64)
+./scripts/run-native-sdr-host.sh
+
+# Linux only: install as persistent systemd service
+./scripts/install-native-sdr-service.sh --start
+```
+
+Useful runner flags:
+
+- `--print-target` to verify resolved machine target
+- `--skip-build` to run an existing binary without cmake
+- `--dry-run` to print command only
+- `--help-script` to view launcher usage
+
+Key runtime envs (from shell or `/etc/default/sdr-native`):
+
+- `SDR_DRIVER=auto|hackrf|rtl`
+- `AUTO_FALLBACK_DRIVER=hackrf|rtl` (used if autodetect cannot identify USB device)
+- `SDR_FREQ_HZ=2400000000`
+- `SDR_SR_HZ=10000000`
+- `SDR_GAIN_DB=<optional>`
+- `SDR_INDEX=0` (RTL)
+- `SDR_SERIAL=<optional>`
+- `SDR_ZMQ_ENDPOINT=tcp://127.0.0.1:5555`
+- `SDR_HARD_RESET_ON_STOP=true|false`
+- `NATIVE_SKIP_BUILD=true|false` (default `false`)
 
 ## Docker (Ubuntu 20 Desktop + Full Stack)
 
