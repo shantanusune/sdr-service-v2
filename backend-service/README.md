@@ -60,6 +60,7 @@ Streaming:
 - `APP_DETECTION_IQ_DUMP_DIR` (default `./data/iq-dumps`)
 - `APP_DETECTION_IQ_DUMP_MAX_BYTES` (default `131072`)
 - `APP_DETECTION_IQ_DUMP_MAX_FILES` (default `2000`)
+- `APP_DETECTION_ML_MODEL_PATH` (optional JSON model file path; default uses embedded model)
 
 Detection events now include IQ dump metadata in `evidence` when dump is enabled:
 - `iqDumpPath`
@@ -72,3 +73,11 @@ Detection events now include IQ dump metadata in `evidence` when dump is enabled
 - `digital_video_link`
 - `fhss_control_suspected`
 - `unknown_2_4ghz`
+
+ML model inference fields in event evidence:
+- `mlModelVersion`
+- `mlModelSource`
+- `mlProbabilityByLabel`
+
+Model file template:
+- `config/iq-ml-model-template.json`

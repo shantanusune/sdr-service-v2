@@ -135,6 +135,8 @@ public class DetectionEventService {
             evidence.put("mlConfidence", mlInference.confidence());
             evidence.put("mlNearKnownChannel", mlInference.nearKnownChannel());
             evidence.put("mlNearestKnownChannelHz", mlInference.nearestKnownChannelHz());
+            evidence.put("mlModelVersion", mlInference.modelVersion());
+            evidence.put("mlModelSource", mlInference.modelSource());
             evidence.put("mlProbabilityByLabel", new LinkedHashMap<>(mlInference.probabilityByLabel()));
         } else {
             evidence.put("mlEnabled", false);

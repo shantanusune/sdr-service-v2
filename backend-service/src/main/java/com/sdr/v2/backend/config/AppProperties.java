@@ -174,6 +174,7 @@ public class AppProperties {
             private double blend = 0.45;
             private double overrideThreshold = 0.78;
             private long knownChannelToleranceHz = 12_000_000L;
+            private String modelPath = "";
 
             public boolean isEnabled() {
                 return enabled;
@@ -205,6 +206,14 @@ public class AppProperties {
 
             public void setKnownChannelToleranceHz(long knownChannelToleranceHz) {
                 this.knownChannelToleranceHz = knownChannelToleranceHz;
+            }
+
+            public String getModelPath() {
+                return modelPath;
+            }
+
+            public void setModelPath(String modelPath) {
+                this.modelPath = modelPath;
             }
         }
     }

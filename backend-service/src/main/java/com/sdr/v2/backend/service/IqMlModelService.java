@@ -1,19 +1,60 @@
 package com.sdr.v2.backend.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sdr.v2.backend.config.AppProperties;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
 public class IqMlModelService {
+
+    private static final Logger log = LoggerFactory.getLogger(IqMlModelService.class);
 
     public static final String LABEL_WIFI_CONTROL_LINK = "wifi_control_link";
     public static final String LABEL_DIGITAL_VIDEO_LINK = "digital_video_link";
     public static final String LABEL_FHSS_CONTROL_SUSPECTED = "fhss_control_suspected";
     public static final String LABEL_DRONE_IQ_ACTIVITY = "drone_iq_activity";
     public static final String LABEL_RF_BAND_ACTIVITY = "rf_band_activity";
+
+    private static final String[] LABELS = new String[]{
+            LABEL_WIFI_CONTROL_LINK,
+            LABEL_DIGITAL_VIDEO_LINK,
+            LABEL_FHSS_CONTROL_SUSPECTED,
+            LABEL_DRONE_IQ_ACTIVITY,
+            LABEL_RF_BAND_ACTIVITY
+    };
+
+    private static final int F_IN24_BAND = 0;
+    private static final int F_IN5_BAND = 1;
+    private static final int F_CHANNEL_PRIOR = 2;
+    private static final int F_CONTROL_BW_CLOSENESS = 3;
+    private static final int F_WIDE_BW = 4;
+    private static final int F_NARROW_BW = 5;
+    private static final int F_FLATNESS = 6;
+    private static final int F_ZCR = 7;
+    private static final int F_ENERGY = 8;
+    private static final int F_BURST = 9;
+    private static final int F_TONE = 10;
+    private static final int F_HOP_DELTA = 11;
+    private static final int F_HOP_RATE = 12;
+    private static final int F_STATIC_WIFI = 13;
+    private static final int F_STATIC_DRONE = 14;
+    private static final int F_STATIC_CONTROL = 15;
+    private static final int F_STATIC_VIDEO = 16;
+    private static final int F_STATIC_FHSS = 17;
+    private static final int FEATURE_COUNT = 18;
+
+    private static final String MODEL_SOURCE_EMBEDDED = "embedded";
 
     private static final long[] KNOWN_CHANNELS_HZ = new long[]{
             // FPV analog bands (A/B/E/F/R/S)
@@ -36,12 +77,21 @@ public class IqMlModelService {
     };
 
     private final AppProperties props;
+    private final ObjectMapper objectMapper;
+    private volatile ModelRuntime modelRuntime = defaultRuntime();
 
-    public IqMlModelService(AppProperties props) {
+    public IqMlModelService(AppProperties props, ObjectMapper objectMapper) {
         this.props = props;
+        this.objectMapper = objectMapper;
+    }
+
+    @PostConstruct
+    void init() {
+        loadModelRuntime();
     }
 
     public MlInference infer(FeatureVector vector) {
+        ModelRuntime runtime = modelRuntime;
         KnownChannelMatch known = nearestKnownChannelMatch(
                 vector.centerFreqHz(),
                 vector.peakFreqHz(),
@@ -63,70 +113,35 @@ public class IqMlModelService {
         double in24Band = inRange(vector.centerFreqHz(), 2_400_000_000L, 2_483_500_000L) ? 1.0 : 0.0;
         double in5Band = inRange(vector.centerFreqHz(), 5_100_000_000L, 5_950_000_000L) ? 1.0 : 0.0;
 
-        double logitControl = -1.30
-                + (1.90 * in24Band)
-                + (1.30 * channelPriorScore)
-                + (1.40 * closenessScore(bandwidthMHz, 7.0, 6.0))
-                + (0.90 * flatnessScore)
-                + (0.80 * zcrScore)
-                + (0.60 * energyScore)
-                + (0.90 * vector.staticControlLinkScore())
-                + (0.40 * vector.staticWifiScore())
-                - (0.40 * hopDeltaScore);
+        double[] features = new double[FEATURE_COUNT];
+        features[F_IN24_BAND] = in24Band;
+        features[F_IN5_BAND] = in5Band;
+        features[F_CHANNEL_PRIOR] = channelPriorScore;
+        features[F_CONTROL_BW_CLOSENESS] = closenessScore(bandwidthMHz, 7.0, 6.0);
+        features[F_WIDE_BW] = wideBandwidthScore;
+        features[F_NARROW_BW] = narrowBandwidthScore;
+        features[F_FLATNESS] = flatnessScore;
+        features[F_ZCR] = zcrScore;
+        features[F_ENERGY] = energyScore;
+        features[F_BURST] = burstScore;
+        features[F_TONE] = toneScore;
+        features[F_HOP_DELTA] = hopDeltaScore;
+        features[F_HOP_RATE] = hopRateScore;
+        features[F_STATIC_WIFI] = vector.staticWifiScore();
+        features[F_STATIC_DRONE] = vector.staticDroneScore();
+        features[F_STATIC_CONTROL] = vector.staticControlLinkScore();
+        features[F_STATIC_VIDEO] = vector.staticDigitalVideoScore();
+        features[F_STATIC_FHSS] = vector.staticFhssScore();
 
-        double logitVideo = -1.45
-                + (1.40 * in24Band)
-                + (1.30 * in5Band)
-                + (1.25 * channelPriorScore)
-                + (1.80 * wideBandwidthScore)
-                + (0.90 * flatnessScore)
-                + (0.50 * energyScore)
-                + (0.90 * vector.staticDigitalVideoScore())
-                + (0.30 * vector.staticWifiScore())
-                - (0.40 * burstScore)
-                - (0.25 * hopDeltaScore);
+        double[] logits = new double[LABELS.length];
+        for (int i = 0; i < LABELS.length; i++) {
+            double v = runtime.bias()[i];
+            for (int j = 0; j < FEATURE_COUNT; j++) {
+                v += runtime.weights()[i][j] * features[j];
+            }
+            logits[i] = v;
+        }
 
-        double logitFhss = -1.55
-                + (1.70 * in24Band)
-                + (1.20 * channelPriorScore)
-                + (1.20 * narrowBandwidthScore)
-                + (1.30 * hopDeltaScore)
-                + (1.10 * hopRateScore)
-                + (0.60 * burstScore)
-                + (1.00 * vector.staticFhssScore());
-
-        double logitDrone = -1.65
-                + (0.90 * channelPriorScore)
-                + (1.00 * narrowBandwidthScore)
-                + (0.90 * toneScore)
-                + (0.80 * energyScore)
-                + (0.70 * burstScore)
-                + (0.50 * hopDeltaScore)
-                + (0.40 * in5Band)
-                + (0.70 * vector.staticDroneScore());
-
-        double logitRf = -0.95
-                + (0.90 * energyScore)
-                + (0.60 * flatnessScore)
-                + (0.40 * wideBandwidthScore)
-                + (0.20 * in24Band)
-                + (0.20 * in5Band)
-                + (0.20 * Math.max(vector.staticWifiScore(), vector.staticDroneScore()));
-
-        String[] labels = new String[]{
-                LABEL_WIFI_CONTROL_LINK,
-                LABEL_DIGITAL_VIDEO_LINK,
-                LABEL_FHSS_CONTROL_SUSPECTED,
-                LABEL_DRONE_IQ_ACTIVITY,
-                LABEL_RF_BAND_ACTIVITY
-        };
-        double[] logits = new double[]{
-                logitControl,
-                logitVideo,
-                logitFhss,
-                logitDrone,
-                logitRf
-        };
         double[] probs = softmax(logits);
 
         int bestIdx = 0;
@@ -139,17 +154,156 @@ public class IqMlModelService {
         }
 
         LinkedHashMap<String, Double> probabilityByLabel = new LinkedHashMap<>();
-        for (int i = 0; i < labels.length; i++) {
-            probabilityByLabel.put(labels[i], round4(probs[i]));
+        for (int i = 0; i < LABELS.length; i++) {
+            probabilityByLabel.put(LABELS[i], round4(probs[i]));
         }
 
         return new MlInference(
-                labels[bestIdx],
+                LABELS[bestIdx],
                 round4(bestProb),
                 probabilityByLabel,
                 known.isNearKnownChannel(),
-                known.nearestKnownChannelHz()
+                known.nearestKnownChannelHz(),
+                runtime.version(),
+                runtime.source()
         );
+    }
+
+    private void loadModelRuntime() {
+        ModelRuntime fallback = defaultRuntime();
+        String configuredPath = props.getDetection().getMl().getModelPath();
+        if (configuredPath == null || configuredPath.isBlank()) {
+            modelRuntime = fallback;
+            return;
+        }
+
+        Path modelPath = Path.of(configuredPath).toAbsolutePath().normalize();
+        if (!Files.isRegularFile(modelPath)) {
+            log.warn("Configured ML model path not found: {}. Using embedded model.", modelPath);
+            modelRuntime = fallback;
+            return;
+        }
+
+        try {
+            ModelArtifact artifact = objectMapper.readValue(modelPath.toFile(), ModelArtifact.class);
+            ModelRuntime loaded = toRuntime(artifact, modelPath.toString());
+            modelRuntime = loaded;
+            log.info("Loaded IQ ML model from {} version={}", modelPath, loaded.version());
+        } catch (Exception e) {
+            log.warn("Failed to load ML model from {}: {}. Using embedded model.", modelPath, e.getMessage());
+            modelRuntime = fallback;
+        }
+    }
+
+    private static ModelRuntime toRuntime(ModelArtifact artifact, String sourcePath) {
+        if (artifact == null) {
+            throw new IllegalArgumentException("model artifact is null");
+        }
+        List<String> labels = artifact.getLabels();
+        double[] artifactBias = artifact.getBias();
+        double[][] artifactWeights = artifact.getWeights();
+
+        if (labels == null || artifactBias == null || artifactWeights == null) {
+            throw new IllegalArgumentException("model artifact must contain labels, bias and weights");
+        }
+        if (labels.size() != LABELS.length) {
+            throw new IllegalArgumentException("labels count mismatch");
+        }
+        if (artifactBias.length != LABELS.length) {
+            throw new IllegalArgumentException("bias count mismatch");
+        }
+        if (artifactWeights.length != LABELS.length) {
+            throw new IllegalArgumentException("weights rows mismatch");
+        }
+
+        HashMap<String, Integer> labelToIndex = new HashMap<>();
+        for (int i = 0; i < labels.size(); i++) {
+            labelToIndex.put(labels.get(i), i);
+        }
+
+        double[] bias = new double[LABELS.length];
+        double[][] weights = new double[LABELS.length][FEATURE_COUNT];
+        for (int targetIdx = 0; targetIdx < LABELS.length; targetIdx++) {
+            Integer sourceIdx = labelToIndex.get(LABELS[targetIdx]);
+            if (sourceIdx == null) {
+                throw new IllegalArgumentException("missing expected label: " + LABELS[targetIdx]);
+            }
+            if (artifactWeights[sourceIdx] == null || artifactWeights[sourceIdx].length != FEATURE_COUNT) {
+                throw new IllegalArgumentException("weights columns mismatch for label: " + LABELS[targetIdx]);
+            }
+            bias[targetIdx] = artifactBias[sourceIdx];
+            System.arraycopy(artifactWeights[sourceIdx], 0, weights[targetIdx], 0, FEATURE_COUNT);
+        }
+
+        String version = artifact.getVersion();
+        if (version == null || version.isBlank()) {
+            version = "external-unknown";
+        }
+        return new ModelRuntime(bias, weights, version, sourcePath);
+    }
+
+    private static ModelRuntime defaultRuntime() {
+        double[] bias = new double[]{
+                -1.30, // wifi_control_link
+                -1.45, // digital_video_link
+                -1.55, // fhss_control_suspected
+                -1.65, // drone_iq_activity
+                -0.95  // rf_band_activity
+        };
+        double[][] weights = new double[LABELS.length][FEATURE_COUNT];
+
+        // wifi_control_link
+        weights[0][F_IN24_BAND] = 1.90;
+        weights[0][F_CHANNEL_PRIOR] = 1.30;
+        weights[0][F_CONTROL_BW_CLOSENESS] = 1.40;
+        weights[0][F_FLATNESS] = 0.90;
+        weights[0][F_ZCR] = 0.80;
+        weights[0][F_ENERGY] = 0.60;
+        weights[0][F_HOP_DELTA] = -0.40;
+        weights[0][F_STATIC_WIFI] = 0.40;
+        weights[0][F_STATIC_CONTROL] = 0.90;
+
+        // digital_video_link
+        weights[1][F_IN24_BAND] = 1.40;
+        weights[1][F_IN5_BAND] = 1.30;
+        weights[1][F_CHANNEL_PRIOR] = 1.25;
+        weights[1][F_WIDE_BW] = 1.80;
+        weights[1][F_FLATNESS] = 0.90;
+        weights[1][F_ENERGY] = 0.50;
+        weights[1][F_BURST] = -0.40;
+        weights[1][F_HOP_DELTA] = -0.25;
+        weights[1][F_STATIC_WIFI] = 0.30;
+        weights[1][F_STATIC_VIDEO] = 0.90;
+
+        // fhss_control_suspected
+        weights[2][F_IN24_BAND] = 1.70;
+        weights[2][F_CHANNEL_PRIOR] = 1.20;
+        weights[2][F_NARROW_BW] = 1.20;
+        weights[2][F_BURST] = 0.60;
+        weights[2][F_HOP_DELTA] = 1.30;
+        weights[2][F_HOP_RATE] = 1.10;
+        weights[2][F_STATIC_FHSS] = 1.00;
+
+        // drone_iq_activity
+        weights[3][F_IN5_BAND] = 0.40;
+        weights[3][F_CHANNEL_PRIOR] = 0.90;
+        weights[3][F_NARROW_BW] = 1.00;
+        weights[3][F_ENERGY] = 0.80;
+        weights[3][F_BURST] = 0.70;
+        weights[3][F_TONE] = 0.90;
+        weights[3][F_HOP_DELTA] = 0.50;
+        weights[3][F_STATIC_DRONE] = 0.70;
+
+        // rf_band_activity
+        weights[4][F_IN24_BAND] = 0.20;
+        weights[4][F_IN5_BAND] = 0.20;
+        weights[4][F_WIDE_BW] = 0.40;
+        weights[4][F_FLATNESS] = 0.60;
+        weights[4][F_ENERGY] = 0.90;
+        weights[4][F_STATIC_WIFI] = 0.10;
+        weights[4][F_STATIC_DRONE] = 0.10;
+
+        return new ModelRuntime(bias, weights, "embedded-v1", MODEL_SOURCE_EMBEDDED);
     }
 
     private static KnownChannelMatch nearestKnownChannelMatch(long centerFreqHz, long peakFreqHz, long toleranceHz) {
@@ -238,9 +392,56 @@ public class IqMlModelService {
                               double confidence,
                               Map<String, Double> probabilityByLabel,
                               boolean nearKnownChannel,
-                              long nearestKnownChannelHz) {
+                              long nearestKnownChannelHz,
+                              String modelVersion,
+                              String modelSource) {
     }
 
     private record KnownChannelMatch(boolean isNearKnownChannel, long nearestKnownChannelHz) {
+    }
+
+    private record ModelRuntime(double[] bias,
+                                double[][] weights,
+                                String version,
+                                String source) {
+    }
+
+    public static class ModelArtifact {
+        private String version;
+        private List<String> labels;
+        private double[] bias;
+        private double[][] weights;
+
+        public String getVersion() {
+            return version;
+        }
+
+        public void setVersion(String version) {
+            this.version = version;
+        }
+
+        public List<String> getLabels() {
+            return labels;
+        }
+
+        public void setLabels(List<String> labels) {
+            this.labels = labels;
+        }
+
+        public double[] getBias() {
+            return bias;
+        }
+
+        public void setBias(double[] bias) {
+            this.bias = bias;
+        }
+
+        public double[][] getWeights() {
+            return weights;
+        }
+
+        public void setWeights(double[][] weights) {
+            this.weights = weights;
+        }
     }
 }

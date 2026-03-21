@@ -42,6 +42,7 @@ app:
       blend: ${APP_DETECTION_ML_BLEND:0.45}
       override-threshold: ${APP_DETECTION_ML_OVERRIDE_THRESHOLD:0.78}
       known-channel-tolerance-hz: ${APP_DETECTION_ML_CHANNEL_TOLERANCE_HZ:12000000}
+      model-path: ${APP_DETECTION_ML_MODEL_PATH:}
 
   registry:
     offline-after-ms: ${APP_REGISTRY_OFFLINE_AFTER_MS:45000}
