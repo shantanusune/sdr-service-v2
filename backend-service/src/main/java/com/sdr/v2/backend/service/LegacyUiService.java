@@ -4,7 +4,6 @@ import com.sdr.v2.backend.web.dto.HostDto;
 import com.sdr.v2.backend.web.dto.RadioDeviceDto;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,12 +15,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class LegacyUiService {
 
     private final RegistryStateService registry;
+    private final RawLabCaptureService rawLab;
 
     private final CopyOnWriteArrayList<Map<String, Object>> dashboards = new CopyOnWriteArrayList<>();
-    private final CopyOnWriteArrayList<Map<String, Object>> captures = new CopyOnWriteArrayList<>();
 
-    public LegacyUiService(RegistryStateService registry) {
+    public LegacyUiService(RegistryStateService registry, RawLabCaptureService rawLab) {
         this.registry = registry;
+        this.rawLab = rawLab;
         seedDefaults();
     }
 
@@ -142,32 +142,15 @@ public class LegacyUiService {
     }
 
     public Map<String, Object> createCapture(Map<String, Object> request) {
-        String captureId = "cap-" + UUID.randomUUID();
-        long now = System.currentTimeMillis();
-        LinkedHashMap<String, Object> out = new LinkedHashMap<>();
-        out.put("captureId", captureId);
-        out.put("deviceId", request.getOrDefault("deviceId", "unknown"));
-        out.put("timestamp", now);
-        out.put("duration", request.getOrDefault("seconds", 5));
-        out.put("status", "pending");
-        captures.add(out);
-        return new LinkedHashMap<>(out);
+        return rawLab.createCapture(request);
     }
 
     public List<Map<String, Object>> listCaptures() {
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (Map<String, Object> c : captures) {
-            out.add(new LinkedHashMap<>(c));
-        }
-        return out;
+        return rawLab.listCaptures();
     }
 
     public Map<String, Object> createAnalysisJob(Map<String, Object> request) {
-        return Map.of(
-                "jobId", "job-" + UUID.randomUUID(),
-                "captureId", request.getOrDefault("captureId", "unknown"),
-                "status", "pending"
-        );
+        return rawLab.createAnalysisJob(request);
     }
 
     private void seedDefaults() {

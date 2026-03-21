@@ -123,8 +123,16 @@ export interface Capture {
   deviceId: string;
   timestamp: number;
   duration: number;
-  status: 'pending' | 'complete' | 'failed';
+  status: 'pending' | 'capturing' | 'complete' | 'failed';
   fileSize?: number;
+  frameCount?: number;
+  startedAt?: number;
+  completedAt?: number;
+  truncated?: boolean;
+  summaryTruncated?: boolean;
+  sampleSummaries?: number;
+  analysis?: AnalysisResult;
+  error?: string;
 }
 
 // Analysis job
@@ -132,12 +140,28 @@ export interface AnalysisJob {
   jobId: string;
   captureId: string;
   status: 'pending' | 'running' | 'complete' | 'failed';
+  requestedAnalyses?: string[];
   result?: AnalysisResult;
+  error?: string;
 }
 
 // Analysis result
 export interface AnalysisResult {
   droneScore: number;
+  dominantLabel?: string;
+  sampledFrames?: number;
+  durationSec?: number;
+  analysesRun?: string[];
+  energyProfile?: Record<string, number>;
+  burstActivity?: Record<string, number>;
+  frequencyHopping?: Record<string, number>;
+  bandwidthOccupancy?: Record<string, number>;
+  protocolHints?: {
+    label: string;
+    confidence: number;
+    in24GHzBand: boolean;
+    scores: Record<string, number>;
+  };
   detectedBands: {
     startHz: number;
     endHz: number;
