@@ -34,5 +34,5 @@ cmake --build . -j
 HackRF example:
 
 ```bash
-./native_sdr --driver hackrf --device-id hackrf_0 --freq 2400000000 --sr 10000000
+./native_sdr --driver hackrf --device-id hackrf_0 --freq 2400000000 --sr 10000000 --zmq tcp://127.0.0.1:5555
 ```

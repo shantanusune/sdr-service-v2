@@ -22,6 +22,10 @@ typedef struct {
 } app_ctx_t;
 
 static atomic_int g_stop = 0;
+static atomic_int g_cleanup_done = 0;
+static app_ctx_t* g_cleanup_ctx = NULL;
+static sdr_device_handle_t* g_cleanup_handle = NULL;
+static sdr_zmq_publisher_t* g_cleanup_pub = NULL;
 
 static uint64_t now_monotonic_ns(void) {
   struct timespec ts;
@@ -145,6 +149,43 @@ static void on_signal(int sig) {
   atomic_store(&g_stop, 1);
 }
 
+static void install_signal_handlers(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = on_signal;
+  sigemptyset(&sa.sa_mask);
+
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
+  sigaction(SIGHUP, &sa, NULL);
+  sigaction(SIGQUIT, &sa, NULL);
+}
+
+static void cleanup_runtime(void) {
+  if (atomic_exchange(&g_cleanup_done, 1) != 0) {
+    return;
+  }
+
+  if (g_cleanup_ctx && g_cleanup_pub) {
+    publish_service_meta(g_cleanup_ctx, "STOPPED");
+    publish_devices_meta(g_cleanup_ctx, "STOPPED");
+  }
+
+  if (g_cleanup_handle) {
+    sdr_device_stop(g_cleanup_handle);
+    g_cleanup_handle = NULL;
+  }
+
+  if (g_cleanup_pub) {
+    sdr_zmq_publisher_destroy(g_cleanup_pub);
+    g_cleanup_pub = NULL;
+  }
+
+  if (g_cleanup_ctx) {
+    g_cleanup_ctx->pub = NULL;
+  }
+}
+
 static void usage(const char* prog) {
   fprintf(stderr,
           "Usage: %s [--driver rtl|hackrf] [--device-id id] [--index n] [--serial s] [--freq hz] [--sr hz] [--gain db] [--zmq endpoint]\n",
@@ -189,8 +230,8 @@ int main(int argc, char** argv) {
     }
   }
 
-  signal(SIGINT, on_signal);
-  signal(SIGTERM, on_signal);
+  install_signal_handlers();
+  (void)atexit(cleanup_runtime);
 
   sdr_zmq_publisher_t* pub = sdr_zmq_publisher_create(zmq_endpoint);
   if (!pub) {
@@ -203,6 +244,8 @@ int main(int argc, char** argv) {
   ctx.pub = pub;
   ctx.cfg = cfg;
   atomic_init(&ctx.seq, 0ULL);
+  g_cleanup_ctx = &ctx;
+  g_cleanup_pub = pub;
 
   publish_host_meta(&ctx);
   publish_topics_meta(&ctx);
@@ -212,10 +255,9 @@ int main(int argc, char** argv) {
   sdr_device_handle_t* handle = NULL;
   if (sdr_device_start(&cfg, on_samples, &ctx, &handle) != 0) {
     fprintf(stderr, "device start failed: %s\n", sdr_device_last_error());
-    publish_service_meta(&ctx, "STOPPED");
-    sdr_zmq_publisher_destroy(pub);
     return 1;
   }
+  g_cleanup_handle = handle;
 
   fprintf(stdout, "native_sdr started driver=%s device=%s zmq=%s\n",
           (cfg.driver == SDR_DRIVER_HACKRF) ? "hackrf" : "rtl",
@@ -228,10 +270,7 @@ int main(int argc, char** argv) {
     sleep(5);
   }
 
-  sdr_device_stop(handle);
-  publish_service_meta(&ctx, "STOPPED");
-  publish_devices_meta(&ctx, "STOPPED");
-  sdr_zmq_publisher_destroy(pub);
+  cleanup_runtime();
 
   return 0;
 }
