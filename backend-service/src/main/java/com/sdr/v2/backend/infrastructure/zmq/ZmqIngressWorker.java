@@ -10,6 +10,7 @@ import com.sdr.v2.backend.domain.SpectrumFrame;
 import com.sdr.v2.backend.infrastructure.stream.StreamHub;
 import com.sdr.v2.backend.service.DetectionEventService;
 import com.sdr.v2.backend.service.NativeActivityService;
+import com.sdr.v2.backend.service.RawLabCaptureService;
 import com.sdr.v2.backend.service.RegistryStateService;
 import com.sdr.v2.backend.service.SpectrumBinaryFrameCodec;
 import com.sdr.v2.backend.service.SpectrumService;
@@ -38,6 +39,7 @@ public class ZmqIngressWorker implements SmartLifecycle {
     private final SpectrumService spectrum;
     private final DetectionEventService detections;
     private final NativeActivityService nativeActivity;
+    private final RawLabCaptureService rawLabCaptures;
     private final StreamHub streamHub;
     private final SpectrumBinaryFrameCodec spectrumCodec;
     private final ObjectMapper om = new ObjectMapper();
@@ -50,6 +52,7 @@ public class ZmqIngressWorker implements SmartLifecycle {
                             SpectrumService spectrum,
                             DetectionEventService detections,
                             NativeActivityService nativeActivity,
+                            RawLabCaptureService rawLabCaptures,
                             StreamHub streamHub,
                             SpectrumBinaryFrameCodec spectrumCodec) {
         this.props = props;
@@ -57,6 +60,7 @@ public class ZmqIngressWorker implements SmartLifecycle {
         this.spectrum = spectrum;
         this.detections = detections;
         this.nativeActivity = nativeActivity;
+        this.rawLabCaptures = rawLabCaptures;
         this.streamHub = streamHub;
         this.spectrumCodec = spectrumCodec;
     }
@@ -159,6 +163,7 @@ public class ZmqIngressWorker implements SmartLifecycle {
         );
 
         registry.onRawFrame(frame, header.deviceType());
+        rawLabCaptures.onIqFrame(frame);
         detections.onIqFrame(frame);
 
         SpectrumFrame spectrumFrame = spectrum.onIqFrame(frame);

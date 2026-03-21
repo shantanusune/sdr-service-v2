@@ -9,8 +9,9 @@ import type {
   AnalysisJob,
   CaptureRequest 
 } from '@/models/types';
+import { resolveApiBaseUrl } from '@/config/runtimeEndpoints';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8090';
+const API_BASE_URL = resolveApiBaseUrl();
 const USE_MOCK_API = import.meta.env.VITE_MOCK_API === 'true';
 
 // API client with auth token
@@ -113,11 +114,11 @@ class ApiClient {
   }
 
   // Analysis
-  async createAnalysisJob(captureId: string): Promise<AnalysisJob> {
-    if (USE_MOCK_API) return mockData.createAnalysisJob(captureId);
+  async createAnalysisJob(captureId: string, analyses?: string[]): Promise<AnalysisJob> {
+    if (USE_MOCK_API) return mockData.createAnalysisJob(captureId, analyses);
     return this.fetch<AnalysisJob>('/api/analysis/jobs', {
       method: 'POST',
-      body: JSON.stringify({ captureId }),
+      body: JSON.stringify({ captureId, analyses: analyses ?? [] }),
     });
   }
 }
@@ -232,10 +233,33 @@ const mockData = {
     { captureId: 'cap-003', deviceId: 'rtl_1', timestamp: Date.now() - 1800000, duration: 2, status: 'pending' },
   ],
 
-  createAnalysisJob: (captureId: string): AnalysisJob => ({
+  createAnalysisJob: (captureId: string, analyses?: string[]): AnalysisJob => ({
     jobId: `job-${Date.now()}`,
     captureId,
-    status: 'pending',
+    status: 'complete',
+    requestedAnalyses: analyses ?? [],
+    result: {
+      droneScore: 52.3,
+      dominantLabel: 'unknown_2_4ghz',
+      sampledFrames: 124,
+      durationSec: 10,
+      analysesRun: analyses ?? ['energy_profile', 'burst_activity', 'frequency_hopping', 'bandwidth_occupancy', 'protocol_hints'],
+      detectedBands: [
+        { startHz: 2_402_000_000, endHz: 2_407_000_000, label: 'unknown_2_4ghz', confidence: 0.61 },
+        { startHz: 2_436_000_000, endHz: 2_441_000_000, label: 'unknown_2_4ghz', confidence: 0.44 },
+      ],
+      protocolHints: {
+        label: 'unknown_2_4ghz',
+        confidence: 0.52,
+        in24GHzBand: true,
+        scores: {
+          controlLinkScore: 0.41,
+          digitalVideoScore: 0.38,
+          fhssScore: 0.33,
+          unknownScore: 0.52,
+        },
+      },
+    },
   }),
 };
 
