@@ -27,6 +27,7 @@ static app_ctx_t* g_cleanup_ctx = NULL;
 static sdr_device_handle_t* g_cleanup_handle = NULL;
 static sdr_zmq_publisher_t* g_cleanup_pub = NULL;
 static const int g_start_retry_delay_ms = 2000;
+static const uint64_t g_heartbeat_interval_ns = 5000000000ULL;
 
 static uint64_t now_monotonic_ns(void) {
   struct timespec ts;
@@ -80,20 +81,85 @@ static void publish_service_meta(app_ctx_t* ctx, const char* status) {
   publish_json(ctx->pub, "meta/service", json);
 }
 
-static void publish_devices_meta(app_ctx_t* ctx, const char* status) {
+static void publish_devices_meta(app_ctx_t* ctx, const char* status, int connected) {
   const char* type = (ctx->cfg.driver == SDR_DRIVER_HACKRF) ? "HACKRF" : "RTLSDR";
   char json[1024];
-  snprintf(json, sizeof(json),
-           "{\"connected\":[{\"id\":\"%s\",\"type\":\"%s\",\"capabilities\":{\"minFreqHz\":1000000,\"maxFreqHz\":6000000000,\"maxSampleRateHz\":20000000},\"caps\":{\"minHz\":1000000,\"maxHz\":6000000000,\"bwHz\":20000000},\"state\":{\"open\":true,\"rxRunning\":%s,\"rx\":%s,\"centerFreqHz\":%llu,\"centerHz\":%llu,\"sampleRateHz\":%u,\"srHz\":%u}}]}",
-           ctx->cfg.device_id,
-           type,
-           (strcmp(status, "RUNNING") == 0) ? "true" : "false",
-           (strcmp(status, "RUNNING") == 0) ? "true" : "false",
-           (unsigned long long)ctx->cfg.center_freq_hz,
-           (unsigned long long)ctx->cfg.center_freq_hz,
-           ctx->cfg.sample_rate_hz,
-           ctx->cfg.sample_rate_hz);
+  if (connected) {
+    snprintf(json, sizeof(json),
+             "{\"full\":true,\"connected\":[{\"id\":\"%s\",\"type\":\"%s\",\"usb\":{\"serial\":\"%s\"},\"capabilities\":{\"minFreqHz\":1000000,\"maxFreqHz\":6000000000,\"maxSampleRateHz\":20000000},\"caps\":{\"minHz\":1000000,\"maxHz\":6000000000,\"bwHz\":20000000},\"state\":{\"open\":true,\"rxRunning\":%s,\"rx\":%s,\"centerFreqHz\":%llu,\"centerHz\":%llu,\"sampleRateHz\":%u,\"srHz\":%u,\"status\":\"%s\"}}]}",
+             ctx->cfg.device_id,
+             type,
+             ctx->cfg.serial,
+             (strcmp(status, "RUNNING") == 0) ? "true" : "false",
+             (strcmp(status, "RUNNING") == 0) ? "true" : "false",
+             (unsigned long long)ctx->cfg.center_freq_hz,
+             (unsigned long long)ctx->cfg.center_freq_hz,
+             ctx->cfg.sample_rate_hz,
+             ctx->cfg.sample_rate_hz,
+             status);
+  } else {
+    snprintf(json, sizeof(json),
+             "{\"full\":true,\"connected\":[]}");
+  }
   publish_json(ctx->pub, "meta/devices", json);
+}
+
+static void sanitize_json_string(char* out, size_t out_len, const char* in) {
+  if (!out || out_len == 0) {
+    return;
+  }
+  if (!in) {
+    out[0] = '\0';
+    return;
+  }
+
+  size_t j = 0;
+  for (size_t i = 0; in[i] != '\0' && j + 1 < out_len; i++) {
+    unsigned char c = (unsigned char)in[i];
+    if (c < 0x20 || c == '"' || c == '\\') {
+      out[j++] = ' ';
+      continue;
+    }
+    out[j++] = (char)c;
+  }
+  out[j] = '\0';
+}
+
+static void publish_usb_meta(app_ctx_t* ctx, const char* event, const char* detail) {
+  const char* driver = (ctx->cfg.driver == SDR_DRIVER_HACKRF) ? "hackrf" : "rtl";
+  unsigned int vendor_id = (ctx->cfg.driver == SDR_DRIVER_HACKRF) ? 0x1d50U : 0x0bdaU;
+  unsigned int product_id = (ctx->cfg.driver == SDR_DRIVER_HACKRF) ? 0x6089U : 0x2838U;
+  char safe_detail[192];
+  sanitize_json_string(safe_detail, sizeof(safe_detail), detail);
+
+  char json[1024];
+  if (safe_detail[0] != '\0') {
+    snprintf(json, sizeof(json),
+             "{\"event\":\"%s\",\"deviceId\":\"%s\",\"driver\":\"%s\",\"index\":%d,\"serial\":\"%s\",\"usb\":{\"vendorId\":\"%04x\",\"productId\":\"%04x\",\"serial\":\"%s\"},\"detail\":\"%s\",\"tsNs\":%llu}",
+             event,
+             ctx->cfg.device_id,
+             driver,
+             ctx->cfg.index,
+             ctx->cfg.serial,
+             vendor_id,
+             product_id,
+             ctx->cfg.serial,
+             safe_detail,
+             (unsigned long long)now_monotonic_ns());
+  } else {
+    snprintf(json, sizeof(json),
+             "{\"event\":\"%s\",\"deviceId\":\"%s\",\"driver\":\"%s\",\"index\":%d,\"serial\":\"%s\",\"usb\":{\"vendorId\":\"%04x\",\"productId\":\"%04x\",\"serial\":\"%s\"},\"tsNs\":%llu}",
+             event,
+             ctx->cfg.device_id,
+             driver,
+             ctx->cfg.index,
+             ctx->cfg.serial,
+             vendor_id,
+             product_id,
+             ctx->cfg.serial,
+             (unsigned long long)now_monotonic_ns());
+  }
+  publish_json(ctx->pub, "meta/usb", json);
 }
 
 static void publish_topics_meta(app_ctx_t* ctx) {
@@ -169,7 +235,7 @@ static void cleanup_runtime(void) {
 
   if (g_cleanup_ctx && g_cleanup_pub) {
     publish_service_meta(g_cleanup_ctx, "STOPPED");
-    publish_devices_meta(g_cleanup_ctx, "STOPPED");
+    publish_devices_meta(g_cleanup_ctx, "STOPPED", 0);
   }
 
   if (g_cleanup_handle) {
@@ -267,41 +333,70 @@ int main(int argc, char** argv) {
   publish_host_meta(&ctx);
   publish_topics_meta(&ctx);
   publish_service_meta(&ctx, "STARTING");
-  publish_devices_meta(&ctx, "STARTING");
+  publish_devices_meta(&ctx, "STARTING", 0);
 
   sdr_device_handle_t* handle = NULL;
+  int usb_presence = 0;  // 0=unknown, 1=attached, 2=detached
+  uint64_t next_heartbeat_ns = 0;
+
   while (!atomic_load(&g_stop)) {
-    if (sdr_device_start(&cfg, on_samples, &ctx, &handle) == 0) {
-      break;
+    if (!handle) {
+      sdr_device_handle_t* started = NULL;
+      if (sdr_device_start(&cfg, on_samples, &ctx, &started) == 0 && started != NULL) {
+        handle = started;
+        g_cleanup_handle = handle;
+        if (usb_presence != 1) {
+          publish_usb_meta(&ctx, "ATTACHED", "device stream opened");
+          usb_presence = 1;
+        }
+        publish_service_meta(&ctx, "RUNNING");
+        publish_devices_meta(&ctx, "RUNNING", 1);
+        next_heartbeat_ns = now_monotonic_ns() + g_heartbeat_interval_ns;
+        fprintf(stdout, "native_sdr started driver=%s device=%s zmq=%s\n",
+                (cfg.driver == SDR_DRIVER_HACKRF) ? "hackrf" : "rtl",
+                cfg.device_id,
+                zmq_endpoint);
+        continue;
+      }
+
+      const char* err = sdr_device_last_error();
+      fprintf(stderr,
+              "device start failed: %s (retrying in %d ms)\n",
+              err,
+              g_start_retry_delay_ms);
+      if (usb_presence != 2) {
+        publish_usb_meta(&ctx, "DETACHED", err);
+        usb_presence = 2;
+      }
+      publish_service_meta(&ctx, "RECONNECTING");
+      publish_devices_meta(&ctx, "STOPPED", 0);
+      sleep_interruptible_ms(g_start_retry_delay_ms);
+      continue;
     }
 
-    fprintf(stderr,
-            "device start failed: %s (retrying in %d ms)\n",
-            sdr_device_last_error(),
-            g_start_retry_delay_ms);
-    publish_service_meta(&ctx, "RECONNECTING");
-    publish_devices_meta(&ctx, "STOPPED");
-    sleep_interruptible_ms(g_start_retry_delay_ms);
-  }
+    if (!sdr_device_is_running(handle)) {
+      const char* err = sdr_device_last_error();
+      fprintf(stderr, "device stream stopped: %s\n", err);
+      sdr_device_stop(handle);
+      handle = NULL;
+      g_cleanup_handle = NULL;
+      if (usb_presence != 2) {
+        publish_usb_meta(&ctx, "DETACHED", err);
+        usb_presence = 2;
+      }
+      publish_service_meta(&ctx, "RECONNECTING");
+      publish_devices_meta(&ctx, "STOPPED", 0);
+      sleep_interruptible_ms(g_start_retry_delay_ms);
+      continue;
+    }
 
-  if (!handle) {
-    cleanup_runtime();
-    return atomic_load(&g_stop) ? 0 : 1;
-  }
-  g_cleanup_handle = handle;
-
-  publish_service_meta(&ctx, "RUNNING");
-  publish_devices_meta(&ctx, "RUNNING");
-
-  fprintf(stdout, "native_sdr started driver=%s device=%s zmq=%s\n",
-          (cfg.driver == SDR_DRIVER_HACKRF) ? "hackrf" : "rtl",
-          cfg.device_id,
-          zmq_endpoint);
-
-  while (!atomic_load(&g_stop)) {
-    publish_service_meta(&ctx, "RUNNING");
-    publish_devices_meta(&ctx, "RUNNING");
-    sleep(5);
+    uint64_t now_ns = now_monotonic_ns();
+    if (next_heartbeat_ns == 0 || now_ns >= next_heartbeat_ns) {
+      publish_service_meta(&ctx, "RUNNING");
+      publish_devices_meta(&ctx, "RUNNING", 1);
+      next_heartbeat_ns = now_ns + g_heartbeat_interval_ns;
+    }
+    sleep_interruptible_ms(250);
   }
 
   cleanup_runtime();

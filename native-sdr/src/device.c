@@ -49,7 +49,11 @@ static void rtlsdr_cb(unsigned char* buf, uint32_t len, void* ctx) {
 static void* rtlsdr_thread_main(void* arg) {
   sdr_device_handle_t* h = (sdr_device_handle_t*)arg;
   rtlsdr_reset_buffer(h->rtl);
-  rtlsdr_read_async(h->rtl, rtlsdr_cb, h, 0, 262144);
+  int rc = rtlsdr_read_async(h->rtl, rtlsdr_cb, h, 0, 262144);
+  if (rc != 0 && atomic_load(&h->running)) {
+    snprintf(g_last_error, sizeof(g_last_error), "rtlsdr_read_async stopped (rc=%d)", rc);
+  }
+  atomic_store(&h->running, 0);
   return NULL;
 }
 #endif
@@ -258,4 +262,61 @@ void sdr_device_stop(sdr_device_handle_t* h) {
   }
 
   free(h);
+}
+
+int sdr_device_is_running(sdr_device_handle_t* h) {
+  if (!h) {
+    return 0;
+  }
+
+  if (!atomic_load(&h->running)) {
+    return 0;
+  }
+
+  if (h->cfg->driver == SDR_DRIVER_HACKRF) {
+#ifdef HAVE_HACKRF
+    if (!h->hackrf) {
+      atomic_store(&h->running, 0);
+      set_error("hackrf handle missing");
+      return 0;
+    }
+
+    int rc = hackrf_is_streaming(h->hackrf);
+    if (rc == HACKRF_TRUE) {
+      return 1;
+    }
+
+    atomic_store(&h->running, 0);
+    if (rc == HACKRF_FALSE) {
+      set_error("hackrf stream stopped");
+    } else {
+      snprintf(g_last_error,
+               sizeof(g_last_error),
+               "hackrf stream check failed (%s)",
+               hackrf_error_name(rc));
+    }
+    return 0;
+#else
+    atomic_store(&h->running, 0);
+    set_error("HackRF support not compiled");
+    return 0;
+#endif
+  }
+
+  if (h->cfg->driver == SDR_DRIVER_RTLSDR) {
+#ifdef HAVE_RTLSDR
+    if (!h->rtl) {
+      atomic_store(&h->running, 0);
+      set_error("rtlsdr handle missing");
+      return 0;
+    }
+    return atomic_load(&h->running) ? 1 : 0;
+#else
+    atomic_store(&h->running, 0);
+    set_error("RTL-SDR support not compiled");
+    return 0;
+#endif
+  }
+
+  return atomic_load(&h->running) ? 1 : 0;
 }

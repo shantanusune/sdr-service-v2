@@ -16,6 +16,7 @@
    - `<deviceId>/rawfeed` (`RDSD` header + IQ bytes)
 2. `backend-service` ingests ZMQ and:
    - updates registry state (hosts/devices/datasources/topics/services)
+   - applies USB attach/detach events for auto register/unregister device state
    - runs IQ-first detection
    - computes FFT and serves live spectrum websocket frames
 3. `ui` consumes backend APIs and websocket feeds for dashboards, devices, map, and live spectrum.

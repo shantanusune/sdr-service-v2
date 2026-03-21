@@ -20,7 +20,8 @@ This contract defines the ZeroMQ topics and binary frame format used between `na
 
 - `meta/host`: host identity (`hostname`, `machineIp`, `os`, `arch`, `pid`)
 - `meta/service`: native service heartbeat (`service`, `status`, `version`, `tsNs`)
-- `meta/devices`: connected SDR list and runtime state
+- `meta/devices`: connected SDR list and runtime state (`full=true` means complete snapshot for host)
+- `meta/usb`: USB attach/detach events (`event`, `deviceId`, `driver`, optional `usb`/`serial`, `tsNs`)
 - `meta/topics`: publish/subscribe topic catalog
 
 ## RDSD Header (48 bytes, little-endian)
@@ -44,6 +45,7 @@ This contract defines the ZeroMQ topics and binary frame format used between `na
 - Detection pipeline must consume raw IQ (`rawfeed`) only.
 - FFT/live spectrum must be derived in backend from IQ frames.
 - Metadata topics must update online/offline/health views, not replace IQ payload for detection.
+- `meta/usb` attach/detach must drive device register/unregister state transitions in registry.
 - Consumers must ignore unknown topics and unknown future header flags.
 
 ## Compatibility

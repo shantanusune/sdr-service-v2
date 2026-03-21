@@ -10,9 +10,11 @@ Native C SDR capture service that publishes ZMQ frames and metadata.
   - `meta/host`
   - `meta/service`
   - `meta/devices`
+  - `meta/usb` (`ATTACHED`/`DETACHED`)
   - `meta/topics`
 - On shutdown/restart, stop RX and close cleanly (hard USB reset is optional via flag)
 - Auto-retry device open on startup until hardware becomes available
+- Detect stream drop (USB detach) and auto-reconnect when device is attached again
 
 ## Topics
 

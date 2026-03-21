@@ -437,6 +437,8 @@ public class RegistryStateService {
     }
 
     private void handleDevicesMeta(HostEntry host, Map<String, Object> body) {
+        Instant now = Instant.now();
+        Map<String, Boolean> seenConnected = new LinkedHashMap<>();
         List<?> connected = asList(body.get("connected"));
         for (Object item : connected) {
             Map<String, Object> deviceJson = asMap(item);
@@ -447,6 +449,7 @@ public class RegistryStateService {
             if (deviceId.isBlank()) {
                 continue;
             }
+            seenConnected.put(deviceId, Boolean.TRUE);
 
             DeviceEntry device = ensureDevice(host, deviceId);
             device.deviceType = firstString(deviceJson.get("type"), device.deviceType, STATE_UNKNOWN);
@@ -460,7 +463,7 @@ public class RegistryStateService {
 
             device.centerFreqHz = cf;
             device.sampleRateHz = sr;
-            device.lastSeenAt = Instant.now();
+            device.lastSeenAt = now;
             device.state = rx ? STATE_CAPTURING : (open ? STATE_READY : STATE_OFFLINE);
 
             Map<String, Object> meta = new LinkedHashMap<>();
@@ -475,27 +478,7 @@ public class RegistryStateService {
             }
             device.meta = meta;
 
-            upsertDataSource(
-                    "device:" + host.hostKey + ":" + device.deviceKey + ":spectrum",
-                    "DEVICE",
-                    device.deviceKey + " Spectrum",
-                    device.state,
-                    host.hostKey + "/" + device.deviceKey + "/spectrum",
-                    host,
-                    device,
-                    Map.of("spectrum", true)
-            );
-
-            upsertDataSource(
-                    "device:" + host.hostKey + ":" + device.deviceKey + ":rawfeed",
-                    "DEVICE",
-                    device.deviceKey + " Rawfeed",
-                    device.state,
-                    host.hostKey + "/" + device.deviceKey + "/rawfeed",
-                    host,
-                    device,
-                    Map.of("rawfeed", true)
-            );
+            syncDeviceDataSources(host, device);
         }
 
         List<?> failed = asList(body.get("failed"));
@@ -511,8 +494,27 @@ public class RegistryStateService {
             DeviceEntry device = ensureDevice(host, deviceId);
             device.deviceType = firstString(failedJson.get("type"), device.deviceType, STATE_UNKNOWN);
             device.state = STATE_ERROR;
-            device.lastSeenAt = Instant.now();
+            device.lastSeenAt = now;
             device.meta = Map.of("error", firstString(failedJson.get("error"), "device error"));
+            syncDeviceDataSources(host, device);
+        }
+
+        if (bool(body.get("full"), false)) {
+            for (DeviceEntry device : devicesById.values()) {
+                if (!Objects.equals(device.hostKey, host.hostKey)) {
+                    continue;
+                }
+                if (seenConnected.containsKey(device.deviceKey)) {
+                    continue;
+                }
+                if (STATE_ERROR.equals(device.state)) {
+                    continue;
+                }
+
+                device.state = STATE_OFFLINE;
+                device.lastSeenAt = now;
+                syncDeviceDataSources(host, device);
+            }
         }
     }
 
@@ -546,13 +548,57 @@ public class RegistryStateService {
 
         DeviceEntry device = ensureDevice(host, deviceKey);
         device.lastSeenAt = Instant.now();
-        if ("REMOVED".equals(event)) {
+        String serial = firstString(body.get("serial"), "");
+        if (serial.isBlank()) {
+            Map<String, Object> usb = firstMap(body.get("usb"));
+            serial = firstString(first(usb, "serial"), "");
+        }
+        if (!serial.isBlank()) {
+            device.serialNumber = serial;
+        }
+
+        String typeFromDriver = driverTypeName(firstString(body.get("driver"), ""));
+        if (!STATE_UNKNOWN.equals(typeFromDriver)) {
+            device.deviceType = typeFromDriver;
+        }
+
+        Map<String, Object> nextMeta = new LinkedHashMap<>(device.meta == null ? Map.of() : device.meta);
+        nextMeta.put("usb", new LinkedHashMap<>(body));
+        device.meta = nextMeta;
+
+        if ("REMOVED".equals(event) || "DETACHED".equals(event) || "DISCONNECTED".equals(event)) {
             device.state = STATE_OFFLINE;
-        } else if ("ADDED".equals(event) || "ATTACHED".equals(event)) {
+        } else if ("ADDED".equals(event) || "ATTACHED".equals(event) || "CONNECTED".equals(event)) {
             if (!STATE_CAPTURING.equals(device.state)) {
                 device.state = STATE_READY;
             }
         }
+
+        syncDeviceDataSources(host, device);
+    }
+
+    private void syncDeviceDataSources(HostEntry host, DeviceEntry device) {
+        upsertDataSource(
+                "device:" + host.hostKey + ":" + device.deviceKey + ":spectrum",
+                "DEVICE",
+                device.deviceKey + " Spectrum",
+                device.state,
+                host.hostKey + "/" + device.deviceKey + "/spectrum",
+                host,
+                device,
+                Map.of("spectrum", true)
+        );
+
+        upsertDataSource(
+                "device:" + host.hostKey + ":" + device.deviceKey + ":rawfeed",
+                "DEVICE",
+                device.deviceKey + " Rawfeed",
+                device.state,
+                host.hostKey + "/" + device.deviceKey + "/rawfeed",
+                host,
+                device,
+                Map.of("rawfeed", true)
+        );
     }
 
     private void maybeCreateDataSourceFromTopic(HostEntry host, String relTopic) {
@@ -686,6 +732,20 @@ public class RegistryStateService {
             case 0 -> "RTLSDR";
             default -> STATE_UNKNOWN;
         };
+    }
+
+    private static String driverTypeName(String driver) {
+        if (driver == null || driver.isBlank()) {
+            return STATE_UNKNOWN;
+        }
+        String upper = driver.toUpperCase(Locale.ROOT);
+        if (upper.contains("HACKRF")) {
+            return "HACKRF";
+        }
+        if (upper.contains("RTL")) {
+            return "RTLSDR";
+        }
+        return STATE_UNKNOWN;
     }
 
     private static String normalizeState(String state) {

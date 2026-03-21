@@ -39,6 +39,7 @@ int sdr_device_start(const sdr_device_config_t* cfg,
                      sdr_device_handle_t** out);
 
 void sdr_device_stop(sdr_device_handle_t* h);
+int sdr_device_is_running(sdr_device_handle_t* h);
 const char* sdr_device_last_error(void);
 
 #ifdef __cplusplus
