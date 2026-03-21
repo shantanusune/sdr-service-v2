@@ -1,6 +1,7 @@
 import type { DataSource, SelectedRadio, RadioSource } from "@/types/sources";
 import type { DataSourceDto, HostDto } from "@/types/api";
 import { isDisabledState, isEnabledState } from "@/types/api";
+import { resolveWsEndpoint } from "@/config/runtimeEndpoints";
 
 /**
  * Static data sources configuration (used as fallback for mock mode).
@@ -77,9 +78,11 @@ export function adaptDataSourceDto(dto: DataSourceDto): {
   enabled: boolean;
   state: string;
 } {
-  const wsEndpoint = dto.wsEndpoint
-    ? `${dto.wsEndpoint}${dto.wsPath || ''}`
-    : 'ws://localhost:8090/ws';
+  const wsBase = resolveWsEndpoint(dto.wsEndpoint);
+  const wsPath = dto.wsPath
+    ? (dto.wsPath.startsWith("/") ? dto.wsPath : `/${dto.wsPath}`)
+    : "";
+  const wsEndpoint = `${wsBase}${wsPath}`;
 
   const radio: RadioSource = {
     id: dto.id.toString(),
