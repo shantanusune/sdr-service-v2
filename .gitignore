@@ -8,6 +8,7 @@ ui/.env
 # Backend
 backend-service/.gradle/
 backend-service/build/
+backend-service/data/
 
 # Native
 native-sdr/build/

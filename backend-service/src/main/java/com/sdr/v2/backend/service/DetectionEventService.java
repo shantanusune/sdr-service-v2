@@ -3,24 +3,37 @@ package com.sdr.v2.backend.service;
 import com.sdr.v2.backend.config.AppProperties;
 import com.sdr.v2.backend.domain.DetectionEvent;
 import com.sdr.v2.backend.domain.RawIqFrame;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Service
 public class DetectionEventService {
 
+    private static final Logger log = LoggerFactory.getLogger(DetectionEventService.class);
     private static final int MAX_EVENTS = 1000;
     private static final int MAX_COMPLEX_SAMPLES = 4096;
     private static final int MAX_FFT_SAMPLES = 1024;
     private static final int MIN_COMPLEX_SAMPLES = 256;
     private static final long WIFI_24_START_HZ = 2_400_000_000L;
     private static final long WIFI_24_END_HZ = 2_483_500_000L;
+    private static final int MIN_DUMP_BYTES = 1024;
+    private static final String IQ_DUMP_EXTENSION = ".iq";
 
     private final AppProperties props;
     private final List<DetectionEvent> events = new ArrayList<>();
@@ -73,8 +86,11 @@ public class DetectionEventService {
         evidence.put("iqFormat", features.iqFormat());
         evidence.put("band24GHz", isWifi24Band(features.centerFreqHz()));
 
+        String eventId = "evt-" + UUID.randomUUID();
+        appendIqDumpEvidence(evidence, eventId, frame);
+
         events.add(0, new DetectionEvent(
-                "evt-" + UUID.randomUUID(),
+                eventId,
                 frame.machineId(),
                 frame.deviceId(),
                 Instant.now(),
@@ -319,6 +335,109 @@ public class DetectionEventService {
 
         double rfScore = clamp01(Math.max(energyScore * 0.60, Math.max(wifiScore, droneScore) * 0.75));
         return new Classification("rf_band_activity", "INFO", rfScore, wifiScore, droneScore);
+    }
+
+    private void appendIqDumpEvidence(HashMap<String, Object> evidence, String eventId, RawIqFrame frame) {
+        if (!props.getDetection().isIqDumpEnabled()) {
+            evidence.put("iqDumpEnabled", false);
+            return;
+        }
+
+        byte[] payload = frame.payload();
+        if (payload == null || payload.length == 0) {
+            evidence.put("iqDumpEnabled", false);
+            evidence.put("iqDumpError", "empty payload");
+            return;
+        }
+
+        try {
+            Path dumpDir = resolveDumpDir();
+            Files.createDirectories(dumpDir);
+
+            int maxDumpBytes = Math.max(MIN_DUMP_BYTES, props.getDetection().getIqDumpMaxBytes());
+            int dumpBytes = Math.min(payload.length, maxDumpBytes);
+            String dumpFileName = buildDumpFileName(eventId, frame);
+            Path dumpPath = dumpDir.resolve(dumpFileName).normalize().toAbsolutePath();
+
+            try (OutputStream out = Files.newOutputStream(
+                    dumpPath,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE)) {
+                out.write(payload, 0, dumpBytes);
+            }
+
+            pruneOldDumps(dumpDir, props.getDetection().getIqDumpMaxFiles());
+
+            evidence.put("iqDumpEnabled", true);
+            evidence.put("iqDumpPath", dumpPath.toString());
+            evidence.put("iqDumpBytes", dumpBytes);
+            evidence.put("iqFrameBytes", payload.length);
+            evidence.put("iqDumpTruncated", dumpBytes < payload.length);
+        } catch (Exception e) {
+            evidence.put("iqDumpEnabled", false);
+            evidence.put("iqDumpError", e.getMessage());
+            log.warn("Failed to write IQ dump for event {}", eventId, e);
+        }
+    }
+
+    private Path resolveDumpDir() {
+        String dir = props.getDetection().getIqDumpDir();
+        if (dir == null || dir.isBlank()) {
+            return Path.of("./data/iq-dumps");
+        }
+        return Path.of(dir);
+    }
+
+    private static String buildDumpFileName(String eventId, RawIqFrame frame) {
+        String machine = sanitizeForFile(frame.machineId());
+        String device = sanitizeForFile(frame.deviceId());
+        return eventId
+                + "_ts" + frame.timestampNs()
+                + "_" + machine
+                + "_" + device
+                + "_cf" + frame.centerFreqHz()
+                + "_sr" + frame.sampleRateHz()
+                + "_fmt" + frame.iqFormat()
+                + IQ_DUMP_EXTENSION;
+    }
+
+    private static String sanitizeForFile(String value) {
+        if (value == null || value.isBlank()) {
+            return "unknown";
+        }
+        return value.replaceAll("[^a-zA-Z0-9._-]", "_");
+    }
+
+    private static void pruneOldDumps(Path dumpDir, int maxFiles) {
+        if (maxFiles <= 0) {
+            return;
+        }
+
+        try (Stream<Path> stream = Files.list(dumpDir)) {
+            List<Path> dumpFiles = stream
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.getFileName().toString().endsWith(IQ_DUMP_EXTENSION))
+                    .sorted(Comparator.comparingLong(DetectionEventService::lastModifiedMillisSafe))
+                    .collect(Collectors.toList());
+
+            int deleteCount = dumpFiles.size() - maxFiles;
+            for (int i = 0; i < deleteCount; i++) {
+                try {
+                    Files.deleteIfExists(dumpFiles.get(i));
+                } catch (IOException ignored) {
+                }
+            }
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static long lastModifiedMillisSafe(Path path) {
+        try {
+            return Files.getLastModifiedTime(path).toMillis();
+        } catch (IOException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     private static double decode(byte value, int iqFormat) {

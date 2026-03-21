@@ -89,6 +89,10 @@ public class AppProperties {
         private boolean iqEnabled = true;
         private double detectionThreshold = 0.22;
         private long detectionCooldownMs = 5000;
+        private boolean iqDumpEnabled = true;
+        private String iqDumpDir = "./data/iq-dumps";
+        private int iqDumpMaxBytes = 131072;
+        private int iqDumpMaxFiles = 2000;
         private List<String> bands = new ArrayList<>(List.of(
                 "433000000-435000000",
                 "863000000-928000000",
@@ -118,6 +122,38 @@ public class AppProperties {
 
         public void setDetectionCooldownMs(long detectionCooldownMs) {
             this.detectionCooldownMs = detectionCooldownMs;
+        }
+
+        public boolean isIqDumpEnabled() {
+            return iqDumpEnabled;
+        }
+
+        public void setIqDumpEnabled(boolean iqDumpEnabled) {
+            this.iqDumpEnabled = iqDumpEnabled;
+        }
+
+        public String getIqDumpDir() {
+            return iqDumpDir;
+        }
+
+        public void setIqDumpDir(String iqDumpDir) {
+            this.iqDumpDir = iqDumpDir;
+        }
+
+        public int getIqDumpMaxBytes() {
+            return iqDumpMaxBytes;
+        }
+
+        public void setIqDumpMaxBytes(int iqDumpMaxBytes) {
+            this.iqDumpMaxBytes = iqDumpMaxBytes;
+        }
+
+        public int getIqDumpMaxFiles() {
+            return iqDumpMaxFiles;
+        }
+
+        public void setIqDumpMaxFiles(int iqDumpMaxFiles) {
+            this.iqDumpMaxFiles = iqDumpMaxFiles;
         }
 
         public List<String> getBands() {
