@@ -53,3 +53,67 @@ npm run dev
 ```
 
 Default backend URL: `http://localhost:8090`
+
+## Docker (Ubuntu 20 Desktop + Full Stack)
+
+This repo includes a single-container Ubuntu 20 desktop runtime that starts:
+
+- `native-sdr` (compiled on container startup)
+- `backend-service` (`./gradlew bootRun`)
+- `ui` (Vite dev server)
+
+It also exposes a browser desktop using noVNC.
+
+### Build
+
+```bash
+docker compose build
+```
+
+### Run (without USB passthrough)
+
+```bash
+docker compose up -d
+```
+
+### Run (with HackRF/RTL-SDR USB passthrough on Linux hosts)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
+```
+
+### Endpoints
+
+- Desktop (noVNC): `http://localhost:6080`
+- UI: `http://localhost:5173`
+- Backend API: `http://localhost:8090`
+- Native ZMQ PUB: `tcp://localhost:5555`
+
+### Persistence
+
+Persistent Docker volumes are configured for:
+
+- `sdr_v2_data` -> `./data` (IQ dumps, RFML labels, trained models)
+- `sdr_v2_gradle` -> Gradle cache
+- `sdr_v2_npm` -> npm cache
+- `sdr_v2_ui_node_modules` -> UI node_modules
+
+### Runtime configuration
+
+You can override startup envs in shell or `.env` before `docker compose up`:
+
+- `DOCKER_PLATFORM=linux/amd64` (default; image is amd64)
+- `SDR_DRIVER=hackrf|rtl`
+- `SDR_DEVICE_ID=hackrf_0|rtl_0`
+- `SDR_INDEX=0` (RTL-SDR index)
+- `SDR_SERIAL=<serial>` (optional)
+- `SDR_FREQ_HZ=2400000000`
+- `SDR_SR_HZ=10000000`
+- `SDR_GAIN_DB=32` (optional)
+- `SDR_HARD_RESET_ON_STOP=true|false`
+- `VITE_MOCK_AUTH=true|false`
+- `VITE_MOCK_API=true|false`
+
+### Notes on macOS/Windows
+
+Direct `/dev/bus/usb` passthrough is a Linux Docker host feature. On macOS/Windows Docker Desktop, SDR USB devices are not directly attachable to Linux containers. For real hardware capture, run this stack on a Linux host (or Linux VM with USB passthrough).

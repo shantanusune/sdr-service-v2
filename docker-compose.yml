@@ -1,0 +1,52 @@
+services:
+  sdr-v2-desktop:
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    build:
+      context: .
+      dockerfile: docker/ubuntu20-desktop/Dockerfile
+    container_name: sdr-v2-desktop
+    restart: unless-stopped
+    environment:
+      WORKSPACE_DIR: /workspace/sdr-services-v2
+
+      # Native SDR runtime settings
+      SDR_DRIVER: ${SDR_DRIVER:-hackrf}
+      SDR_DEVICE_ID: ${SDR_DEVICE_ID:-hackrf_0}
+      SDR_INDEX: ${SDR_INDEX:-0}
+      SDR_SERIAL: ${SDR_SERIAL:-}
+      SDR_FREQ_HZ: ${SDR_FREQ_HZ:-2400000000}
+      SDR_SR_HZ: ${SDR_SR_HZ:-10000000}
+      SDR_GAIN_DB: ${SDR_GAIN_DB:-}
+      SDR_HARD_RESET_ON_STOP: ${SDR_HARD_RESET_ON_STOP:-false}
+      SDR_ZMQ_ENDPOINT: tcp://0.0.0.0:5555
+
+      # Backend runtime settings
+      APP_ZMQ_ENDPOINT: tcp://127.0.0.1:5555
+      APP_SECURITY_AUTH_ENABLED: ${APP_SECURITY_AUTH_ENABLED:-false}
+      APP_DETECTION_IQ_DUMP_DIR: /workspace/sdr-services-v2/data/iq-dumps
+
+      # UI runtime settings
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8090}
+      VITE_WS_BASE_URL: ${VITE_WS_BASE_URL:-ws://localhost:8090}
+      VITE_MOCK_AUTH: ${VITE_MOCK_AUTH:-true}
+      VITE_MOCK_API: ${VITE_MOCK_API:-false}
+      UI_MODE: ${UI_MODE:-dev}
+      UI_PORT: ${UI_PORT:-5173}
+      UI_NPM_INSTALL: ${UI_NPM_INSTALL:-auto}
+    ports:
+      - "6080:80"     # Ubuntu desktop (noVNC via browser)
+      - "8090:8090"   # backend-service
+      - "5173:5173"   # UI dev/preview
+      - "5555:5555"   # native ZMQ PUB
+    volumes:
+      - ./:/workspace/sdr-services-v2
+      - sdr_v2_data:/workspace/sdr-services-v2/data
+      - sdr_v2_gradle:/root/.gradle
+      - sdr_v2_npm:/root/.npm
+      - sdr_v2_ui_node_modules:/workspace/sdr-services-v2/ui/node_modules
+
+volumes:
+  sdr_v2_data:
+  sdr_v2_gradle:
+  sdr_v2_npm:
+  sdr_v2_ui_node_modules:

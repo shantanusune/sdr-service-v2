@@ -1,0 +1,7 @@
+services:
+  sdr-v2-desktop:
+    privileged: true
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    device_cgroup_rules:
+      - "c 189:* rmw"
