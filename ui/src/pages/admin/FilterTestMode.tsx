@@ -101,8 +101,8 @@ const FilterTestMode: React.FC = () => {
     const wsPath = String(radio?.meta?.wsPath || "").trim();
     if (!wsPath) return wsBase;
     try {
-      const normalizedPath = wsPath.startsWith("/") ? wsPath : `/${wsPath}`;
-      return new URL(normalizedPath, wsBase).toString();
+      // Keep path relative so '/ws/stream/' base is preserved.
+      return new URL(wsPath, wsBase).toString();
     } catch {
       return wsBase;
     }
