@@ -314,8 +314,11 @@ public class ZmqIngressWorker implements SmartLifecycle {
 
             // <deviceId>/<stream>
             if ("rawfeed".equals(parts[1]) || "spectrum".equals(parts[1])) {
-                return new TopicParts(fallbackMachineId == null || fallbackMachineId.isBlank() ? "unknown" : fallbackMachineId,
-                        parts[0], parts[1]);
+                if (fallbackMachineId == null || fallbackMachineId.isBlank() || "unknown".equalsIgnoreCase(fallbackMachineId)) {
+                    // Wait for meta/host before accepting short topics to avoid ghost devices on "unknown".
+                    return null;
+                }
+                return new TopicParts(fallbackMachineId, parts[0], parts[1]);
             }
 
             return null;
