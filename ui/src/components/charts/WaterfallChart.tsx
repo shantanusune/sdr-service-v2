@@ -17,7 +17,10 @@ interface WaterfallRow {
   bins: Float32Array;
 }
 
-const APPEND_INTERVAL_MS = 33;
+const APPEND_INTERVAL_MS = 80;
+const MAX_VISIBLE_POINTS = 90000;
+const MAX_TARGET_BINS = 640;
+const MIN_TARGET_BINS = 192;
 const MAX_SAMPLED_VALUES = 24000;
 const GRID_COLOR = 'rgba(180, 195, 220, 0.20)';
 const COLOR_SCALE = [
@@ -32,6 +35,72 @@ const COLOR_SCALE = [
   '#f24e1e',
   '#fff2e8',
 ];
+
+function resolveTargetBins(sourceBins: number): number {
+  if (sourceBins <= MIN_TARGET_BINS) {
+    return sourceBins;
+  }
+  const bounded = Math.min(MAX_TARGET_BINS, sourceBins);
+  return Math.max(MIN_TARGET_BINS, Math.floor(bounded / 8) * 8);
+}
+
+function resolveRowLimit(maxRows: number, binsCount: number): number {
+  const budgetRows = Math.max(80, Math.floor(MAX_VISIBLE_POINTS / Math.max(1, binsCount)));
+  return Math.max(80, Math.min(maxRows, 260, budgetRows));
+}
+
+function downsampleBins(source: number[] | Float32Array, targetBins: number): Float32Array {
+  const sourceBins = source.length;
+  if (sourceBins === 0 || targetBins <= 0) {
+    return new Float32Array(0);
+  }
+
+  if (sourceBins === targetBins) {
+    return Float32Array.from(source);
+  }
+
+  const out = new Float32Array(targetBins);
+
+  if (sourceBins < targetBins) {
+    const ratio = sourceBins / targetBins;
+    for (let i = 0; i < targetBins; i++) {
+      const srcIndex = Math.min(sourceBins - 1, Math.floor(i * ratio));
+      const value = Number(source[srcIndex]);
+      out[i] = Number.isFinite(value) ? value : -140;
+    }
+    return out;
+  }
+
+  const ratio = sourceBins / targetBins;
+  for (let i = 0; i < targetBins; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.max(start + 1, Math.min(sourceBins, Math.floor((i + 1) * ratio)));
+    let sum = 0;
+    let count = 0;
+    let max = -Infinity;
+    for (let j = start; j < end; j++) {
+      const value = Number(source[j]);
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      sum += value;
+      count++;
+      if (value > max) {
+        max = value;
+      }
+    }
+
+    if (count === 0) {
+      out[i] = -140;
+      continue;
+    }
+
+    const avg = sum / count;
+    out[i] = avg * 0.65 + max * 0.35;
+  }
+
+  return out;
+}
 
 function frameSignature(frame: SpectrumFrame): string {
   const bins = frame.binsDbm;
@@ -90,13 +159,13 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
   title,
   width = '100%',
   height = 360,
-  maxRows = 360,
+  maxRows = 220,
   className,
 }) => {
   const [rows, setRows] = useState<WaterfallRow[]>([]);
   const lastSigRef = useRef('');
   const lastAppendRef = useRef(0);
-  const metaRef = useRef<{ bins: number; centerHz: number; spanHz: number } | null>(null);
+  const metaRef = useRef<{ sourceBins: number; targetBins: number; centerHz: number; spanHz: number } | null>(null);
 
   useEffect(() => {
     if (!frame || !frame.binsDbm || frame.binsDbm.length === 0) {
@@ -113,16 +182,19 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
       return;
     }
 
-    const binsCount = frame.binsDbm.length;
+    const sourceBins = frame.binsDbm.length;
+    const targetBins = resolveTargetBins(sourceBins);
     const currentMeta = metaRef.current;
     const freqChanged =
       currentMeta !== null &&
-      (currentMeta.bins !== binsCount ||
+      (currentMeta.sourceBins !== sourceBins ||
+        currentMeta.targetBins !== targetBins ||
         Math.abs(currentMeta.centerHz - frame.centerHz) > Math.max(1, frame.binHz) ||
         Math.abs(currentMeta.spanHz - frame.spanHz) > Math.max(1, frame.binHz));
 
     metaRef.current = {
-      bins: binsCount,
+      sourceBins,
+      targetBins,
       centerHz: frame.centerHz,
       spanHz: frame.spanHz,
     };
@@ -130,10 +202,13 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     lastSigRef.current = signature;
     lastAppendRef.current = now;
 
+    const downsampledBins = downsampleBins(frame.binsDbm, targetBins);
+    const rowLimit = resolveRowLimit(maxRows, downsampledBins.length);
+
     setRows((prev) => {
       const nextBase = freqChanged ? [] : prev;
-      const next = [...nextBase, { ts: Number.isFinite(frame.ts) ? frame.ts : now, bins: Float32Array.from(frame.binsDbm) }];
-      return next.length > maxRows ? next.slice(next.length - maxRows) : next;
+      const next = [...nextBase, { ts: Number.isFinite(frame.ts) ? frame.ts : now, bins: downsampledBins }];
+      return next.length > rowLimit ? next.slice(next.length - rowLimit) : next;
     });
   }, [frame, maxRows]);
 
@@ -158,29 +233,18 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     const startMHz = startHz / 1e6;
     const endMHz = endHz / 1e6;
 
-    const heatmapData: number[][] = [];
+    const totalPoints = rowCount * binsCount;
+    const heatmapData: number[][] = new Array(totalPoints);
+    let cursor = 0;
     for (let r = 0; r < rowCount; r++) {
-      const row = rows[r];
-      const bins = row.bins;
-      const srcCount = bins.length;
-      if (srcCount === 0) {
-        continue;
-      }
-
-      if (srcCount === binsCount) {
-        for (let x = 0; x < binsCount; x++) {
-          const v = Number(bins[x]);
-          heatmapData.push([x, r, Number.isFinite(v) ? v : minDb]);
-        }
-        continue;
-      }
-
-      const ratio = srcCount / binsCount;
+      const bins = rows[r].bins;
       for (let x = 0; x < binsCount; x++) {
-        const srcX = Math.min(srcCount - 1, Math.floor(x * ratio));
-        const v = Number(bins[srcX]);
-        heatmapData.push([x, r, Number.isFinite(v) ? v : minDb]);
+        const v = Number(bins[x]);
+        heatmapData[cursor++] = [x, r, Number.isFinite(v) ? v : minDb];
       }
+    }
+    if (cursor < heatmapData.length) {
+      heatmapData.length = cursor;
     }
 
     const xCategories = Array.from({ length: binsCount }, (_, i) => i);
@@ -266,7 +330,9 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
         {
           type: 'heatmap',
           data: heatmapData,
-          progressive: 75000,
+          silent: true,
+          progressive: Math.max(10000, Math.floor(heatmapData.length / 2)),
+          progressiveThreshold: 3000,
           animation: false,
           emphasis: { disabled: true },
         },
@@ -312,7 +378,7 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     <div className={className || 'rounded-lg border border-border/40 overflow-hidden'} style={{ width, height }}>
       <ReactECharts
         option={option}
-        notMerge
+        notMerge={false}
         lazyUpdate
         opts={chartOpts}
         autoResize
