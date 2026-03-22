@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -26,19 +25,21 @@ import {
 } from "lucide-react";
 import { getFilter, saveFilters, loadFilters } from "@/services/filterStore";
 import { FilterParamsEditor } from "@/components/filters/FilterParamsEditor";
-import { FrequencyInput, formatHz } from "@/components/filters/FrequencyInput";
+import { formatHz } from "@/components/filters/FrequencyInput";
 import {
-  DATA_SOURCES,
   loadSelectedRadios,
-  getDataSource,
+  saveSelectedRadios,
+  groupDataSourcesByHost,
 } from "@/config/dataSources";
-import { WebSocketStreamClient, MockStreamClient } from "@/services/stream";
+import { WebSocketStreamClient } from "@/services/stream";
 import type { StreamClient, SpectrumMessage } from "@/services/stream";
 import { toSpectrumFrame } from "@/services/spectrumAdapter";
 import { useFilterWorker } from "@/hooks/useFilterWorker";
-import type { FilterConfig, MatchResult, SpectrumFrame } from "@/types/sdr";
+import type { FilterConfig, SpectrumFrame } from "@/types/sdr";
 import { FILTER_TYPE_INFO } from "@/types/sdr";
 import { toast } from "@/hooks/use-toast";
+import { useStreamableDatasources } from "@/hooks/useDatasources";
+import type { DataSource } from "@/types/sources";
 
 const MAX_LOG_ENTRIES = 50;
 const TARGET_FPS = 20;
@@ -61,6 +62,8 @@ const FilterTestMode: React.FC = () => {
 
   const [selectedRadio, setSelectedRadio] = useState<string>("");
   const [running, setRunning] = useState(true);
+  const [streamStatus, setStreamStatus] = useState("Disconnected");
+  const [streamConnected, setStreamConnected] = useState(false);
   const [currentMatch, setCurrentMatch] = useState<boolean>(false);
   const [matchLog, setMatchLog] = useState<MatchLogEntry[]>([]);
   const [latestFrame, setLatestFrame] = useState<SpectrumFrame | null>(null);
@@ -70,6 +73,35 @@ const FilterTestMode: React.FC = () => {
   const lastRenderTimeRef = useRef<number>(0);
 
   const { testFilter, isReady: workerReady } = useFilterWorker();
+  const { data: rawDatasources = [], isLoading: isLoadingDatasources } = useStreamableDatasources();
+  const dataSources = useMemo(() => groupDataSourcesByHost(rawDatasources), [rawDatasources]);
+
+  const getSourceAndRadio = useCallback(
+    (radioKey: string): { source: DataSource; radioId: string } | null => {
+      if (!radioKey) return null;
+      const [sourceId, radioId] = radioKey.split(":");
+      if (!sourceId || !radioId) return null;
+      const source = dataSources.find((s) => s.id === sourceId);
+      if (!source) return null;
+      const radio = source.radios.find((r) => r.id === radioId);
+      if (!radio) return null;
+      return { source, radioId };
+    },
+    [dataSources]
+  );
+
+  const resolveRadioEndpoint = useCallback((source: DataSource, radioId: string): string => {
+    const radio = source.radios.find((r) => r.id === radioId);
+    const wsBase = String(radio?.meta?.wsEndpoint || source.endpoint || "").trim();
+    const wsPath = String(radio?.meta?.wsPath || "").trim();
+    if (!wsPath) return wsBase;
+    try {
+      const normalizedPath = wsPath.startsWith("/") ? wsPath : `/${wsPath}`;
+      return new URL(normalizedPath, wsBase).toString();
+    } catch {
+      return wsBase;
+    }
+  }, []);
 
   // Load filter
   useEffect(() => {
@@ -92,56 +124,42 @@ const FilterTestMode: React.FC = () => {
     }
   }, [filter, originalFilter]);
 
-  // Initialize radio selection
+  // Initialize radio selection from saved radio or first available live device
   useEffect(() => {
+    if (dataSources.length === 0) return;
+
+    const availableRadios = dataSources.flatMap((source) =>
+      source.radios.map((radio) => ({
+        key: `${source.id}:${radio.id}`,
+        disabled: Boolean(radio.meta?.disabled),
+      }))
+    );
+
+    if (availableRadios.length === 0) return;
+
+    if (selectedRadio && availableRadios.some((r) => r.key === selectedRadio)) {
+      return;
+    }
+
     const savedRadios = loadSelectedRadios();
     if (savedRadios.length > 0) {
-      setSelectedRadio(`${savedRadios[0].sourceId}:${savedRadios[0].radioId}`);
-    } else {
-      // Pick first available radio
-      for (const source of DATA_SOURCES) {
-        if (source.enabled && source.radios.length > 0) {
-          setSelectedRadio(`${source.id}:${source.radios[0].id}`);
-          break;
-        }
+      const savedKey = `${savedRadios[0].sourceId}:${savedRadios[0].radioId}`;
+      if (availableRadios.some((r) => r.key === savedKey && !r.disabled)) {
+        setSelectedRadio(savedKey);
+        return;
       }
     }
-  }, []);
 
-  // Connect to selected radio
+    const firstEnabled = availableRadios.find((r) => !r.disabled) ?? availableRadios[0];
+    setSelectedRadio(firstEnabled.key);
+  }, [dataSources, selectedRadio]);
+
   useEffect(() => {
-    if (!selectedRadio || !running) return;
-
+    if (!selectedRadio) return;
     const [sourceId, radioId] = selectedRadio.split(":");
-    const source = getDataSource(sourceId);
-    if (!source) return;
-
-    const connect = async () => {
-      let client: StreamClient;
-      try {
-        client = new WebSocketStreamClient(sourceId, source.endpoint);
-        await client.connect();
-      } catch (e) {
-        console.warn(`[FilterTestMode] WS failed, using mock`, e);
-        client = new MockStreamClient(sourceId);
-        await client.connect();
-      }
-
-      client.onSpectrum((msg: SpectrumMessage) => {
-        handleSpectrumMessage(msg);
-      });
-
-      await client.subscribeSpectrum(sourceId, radioId);
-      clientRef.current = client;
-    };
-
-    connect();
-
-    return () => {
-      clientRef.current?.disconnect();
-      clientRef.current = null;
-    };
-  }, [selectedRadio, running]);
+    if (!sourceId || !radioId) return;
+    saveSelectedRadios([{ sourceId, radioId }]);
+  }, [selectedRadio]);
 
   // Handle incoming spectrum frame
   const handleSpectrumMessage = useCallback(
@@ -175,6 +193,76 @@ const FilterTestMode: React.FC = () => {
     },
     [filter, workerReady, testFilter]
   );
+
+  // Connect to selected radio
+  useEffect(() => {
+    if (!selectedRadio || !running) return;
+
+    const selected = getSourceAndRadio(selectedRadio);
+    if (!selected) return;
+    const { source, radioId } = selected;
+    const [sourceId] = selectedRadio.split(":");
+
+    const radio = source.radios.find((r) => r.id === radioId);
+    if (radio?.meta?.disabled) {
+      setStreamConnected(false);
+      setStreamStatus("Selected radio is offline");
+      return;
+    }
+
+    let cancelled = false;
+    const connect = async (): Promise<void> => {
+      setStreamStatus("Connecting...");
+      setStreamConnected(false);
+      try {
+        const endpoint = resolveRadioEndpoint(source, radioId);
+        if (!endpoint) {
+          throw new Error("No websocket endpoint available");
+        }
+
+        const client = new WebSocketStreamClient(sourceId, endpoint);
+        client.onStatus((status) => {
+          if (cancelled) return;
+          setStreamConnected(Boolean(status.connected));
+          setStreamStatus(status.details || (status.connected ? "Connected" : "Disconnected"));
+        });
+        client.onError((error) => {
+          if (cancelled) return;
+          setStreamConnected(false);
+          setStreamStatus(error.message || "Stream error");
+        });
+        client.onSpectrum((msg: SpectrumMessage) => {
+          if (cancelled) return;
+          handleSpectrumMessage(msg);
+        });
+
+        await client.subscribeSpectrum(sourceId, radioId);
+        if (cancelled) {
+          await client.disconnect();
+          return;
+        }
+
+        clientRef.current = client;
+        await client.connect();
+      } catch (e) {
+        if (cancelled) return;
+        const message = e instanceof Error ? e.message : "Failed to connect to live stream";
+        setStreamConnected(false);
+        setStreamStatus(message);
+        toast({ title: "Filter test stream failed", description: message, variant: "destructive" });
+      }
+    };
+
+    void connect();
+
+    return () => {
+      cancelled = true;
+      void clientRef.current?.disconnect();
+      clientRef.current = null;
+      setStreamConnected(false);
+      setStreamStatus("Disconnected");
+    };
+  }, [selectedRadio, running, getSourceAndRadio, resolveRadioEndpoint, handleSpectrumMessage]);
 
   // Draw spectrum chart
   useEffect(() => {
@@ -264,14 +352,13 @@ const FilterTestMode: React.FC = () => {
     }
   };
 
-  // Build radio options
-  const radioOptions = DATA_SOURCES.flatMap((source) =>
-    source.enabled
-      ? source.radios.map((radio) => ({
-          value: `${source.id}:${radio.id}`,
-          label: `${source.name} / ${radio.name}`,
-        }))
-      : []
+  // Build radio options from live datasources
+  const radioOptions = dataSources.flatMap((source) =>
+    source.radios.map((radio) => ({
+      value: `${source.id}:${radio.id}`,
+      label: `${source.name} / ${radio.name}`,
+      disabled: Boolean(radio.meta?.disabled),
+    }))
   );
 
   if (!filter) {
@@ -330,6 +417,9 @@ const FilterTestMode: React.FC = () => {
           >
             {running ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
           </Button>
+          <Badge variant={streamConnected ? "default" : "secondary"}>
+            {running ? streamStatus : "Paused"}
+          </Badge>
         </div>
       </div>
 
@@ -342,7 +432,7 @@ const FilterTestMode: React.FC = () => {
           </SelectTrigger>
           <SelectContent>
             {radioOptions.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
+              <SelectItem key={opt.value} value={opt.value} disabled={opt.disabled}>
                 <div className="flex items-center gap-2">
                   <Radio className="h-3 w-3" />
                   {opt.label}
@@ -351,6 +441,12 @@ const FilterTestMode: React.FC = () => {
             ))}
           </SelectContent>
         </Select>
+        {isLoadingDatasources && (
+          <Badge variant="outline">Loading devices...</Badge>
+        )}
+        {!isLoadingDatasources && radioOptions.length === 0 && (
+          <Badge variant="destructive">No live stream devices found</Badge>
+        )}
         {hasChanges && (
           <Badge variant="secondary" className="ml-auto">
             Unsaved changes

@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -12,33 +11,103 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Play, Square, Zap, AlertTriangle } from "lucide-react";
-import { MockStreamClient } from "@/services/stream";
+import { Play, Square, Zap, AlertTriangle, Radio } from "lucide-react";
+import { WebSocketStreamClient } from "@/services/stream";
+import type { StreamClient, SpectrumMessage } from "@/services/stream";
 import { toSpectrumFrame } from "@/services/spectrumAdapter";
 import { loadFilters } from "@/services/filterStore";
 import { useFilterWorker } from "@/hooks/useFilterWorker";
 import type { SpectrumFrame, FilterConfig, MatchResult } from "@/types/sdr";
+import { useStreamableDatasources } from "@/hooks/useDatasources";
+import { groupDataSourcesByHost, loadSelectedRadios, saveSelectedRadios } from "@/config/dataSources";
+import type { DataSource } from "@/types/sources";
+import { toast } from "@/hooks/use-toast";
 
 const AdminTest: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("Disconnected");
   const [frameCount, setFrameCount] = useState(0);
   const [matchCount, setMatchCount] = useState(0);
   const [lastFrame, setLastFrame] = useState<SpectrumFrame | null>(null);
   const [recentMatches, setRecentMatches] = useState<MatchResult[]>([]);
   const [filters, setFilters] = useState<FilterConfig[]>([]);
   const [testPayload, setTestPayload] = useState<string>("");
+  const [selectedRadio, setSelectedRadio] = useState("");
 
-  const clientRef = useRef<MockStreamClient | null>(null);
+  const clientRef = useRef<StreamClient | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const { evaluate: evaluateFilters, isReady: workerReady } = useFilterWorker();
+  const { data: rawDatasources = [], isLoading: isLoadingDatasources } = useStreamableDatasources();
+  const dataSources = useMemo(() => groupDataSourcesByHost(rawDatasources), [rawDatasources]);
+
+  const getSourceAndRadio = useCallback(
+    (radioKey: string): { source: DataSource; sourceId: string; radioId: string } | null => {
+      if (!radioKey) return null;
+      const [sourceId, radioId] = radioKey.split(":");
+      if (!sourceId || !radioId) return null;
+      const source = dataSources.find((s) => s.id === sourceId);
+      if (!source) return null;
+      const radio = source.radios.find((r) => r.id === radioId);
+      if (!radio || radio.meta?.disabled) return null;
+      return { source, sourceId, radioId };
+    },
+    [dataSources]
+  );
+
+  const resolveRadioEndpoint = useCallback((source: DataSource, radioId: string): string => {
+    const radio = source.radios.find((r) => r.id === radioId);
+    const wsBase = String(radio?.meta?.wsEndpoint || source.endpoint || "").trim();
+    const wsPath = String(radio?.meta?.wsPath || "").trim();
+    if (!wsPath) return wsBase;
+    try {
+      const normalizedPath = wsPath.startsWith("/") ? wsPath : `/${wsPath}`;
+      return new URL(normalizedPath, wsBase).toString();
+    } catch {
+      return wsBase;
+    }
+  }, []);
 
   useEffect(() => {
     setFilters(loadFilters());
   }, []);
 
+  useEffect(() => {
+    if (dataSources.length === 0) return;
+
+    const available = dataSources.flatMap((source) =>
+      source.radios.map((radio) => ({
+        key: `${source.id}:${radio.id}`,
+        disabled: Boolean(radio.meta?.disabled),
+      }))
+    );
+
+    if (available.length === 0) return;
+    if (selectedRadio && available.some((d) => d.key === selectedRadio)) return;
+
+    const saved = loadSelectedRadios();
+    if (saved.length > 0) {
+      const savedKey = `${saved[0].sourceId}:${saved[0].radioId}`;
+      if (available.some((d) => d.key === savedKey && !d.disabled)) {
+        setSelectedRadio(savedKey);
+        return;
+      }
+    }
+
+    const firstEnabled = available.find((d) => !d.disabled) ?? available[0];
+    setSelectedRadio(firstEnabled.key);
+  }, [dataSources, selectedRadio]);
+
+  useEffect(() => {
+    if (!selectedRadio) return;
+    const [sourceId, radioId] = selectedRadio.split(":");
+    if (!sourceId || !radioId) return;
+    saveSelectedRadios([{ sourceId, radioId }]);
+  }, [selectedRadio]);
+
   const handleSpectrumMessage = useCallback(
-    (msg: { sourceId: string; radioId: string; payload: unknown }) => {
+    (msg: SpectrumMessage) => {
       const frame = toSpectrumFrame(msg.payload);
       if (!frame) return;
 
@@ -59,15 +128,59 @@ const AdminTest: React.FC = () => {
   );
 
   const handleStart = async () => {
-    const client = new MockStreamClient("test-source");
-    await client.connect();
-    client.onSpectrum(handleSpectrumMessage);
-    await client.subscribeSpectrum("test-source", "test-radio");
-    clientRef.current = client;
-    setIsRunning(true);
-    setFrameCount(0);
-    setMatchCount(0);
-    setRecentMatches([]);
+    const selected = getSourceAndRadio(selectedRadio);
+    if (!selected) {
+      toast({
+        title: "No live datasource selected",
+        description: "Select an online device stream first",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    await handleStop();
+
+    const { source, sourceId, radioId } = selected;
+    const endpoint = resolveRadioEndpoint(source, radioId);
+    if (!endpoint) {
+      toast({
+        title: "Missing websocket endpoint",
+        description: "Selected datasource has no ws endpoint",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const client = new WebSocketStreamClient(sourceId, endpoint);
+      client.onSpectrum(handleSpectrumMessage);
+      client.onStatus((status) => {
+        setIsConnected(Boolean(status.connected));
+        setStreamStatus(status.details || (status.connected ? "Connected" : "Disconnected"));
+      });
+      client.onError((error) => {
+        setIsConnected(false);
+        setStreamStatus(error.message || "Stream error");
+      });
+
+      await client.subscribeSpectrum(sourceId, radioId);
+      clientRef.current = client;
+      await client.connect();
+
+      setIsRunning(true);
+      setFrameCount(0);
+      setMatchCount(0);
+      setRecentMatches([]);
+    } catch (e) {
+      setIsConnected(false);
+      const message = e instanceof Error ? e.message : "Failed to start live stream";
+      setStreamStatus(message);
+      toast({
+        title: "Live stream failed",
+        description: message,
+        variant: "destructive",
+      });
+    }
   };
 
   const handleStop = async () => {
@@ -76,7 +189,15 @@ const AdminTest: React.FC = () => {
       clientRef.current = null;
     }
     setIsRunning(false);
+    setIsConnected(false);
+    setStreamStatus("Disconnected");
   };
+
+  useEffect(() => {
+    return () => {
+      void handleStop();
+    };
+  }, []);
 
   const handleTestPayload = () => {
     try {
@@ -160,12 +281,21 @@ const AdminTest: React.FC = () => {
     2
   );
 
+  const radioOptions = dataSources.flatMap((source) =>
+    source.radios.map((radio) => ({
+      value: `${source.id}:${radio.id}`,
+      label: `${source.name} / ${radio.name}`,
+      disabled: Boolean(radio.meta?.disabled),
+    }))
+  );
+  const hasLiveOptions = radioOptions.some((opt) => !opt.disabled);
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Filter Test</h1>
         <p className="text-muted-foreground mt-1">
-          Test filter evaluation with mock or custom spectrum data
+          Test filter evaluation against live device spectrum and custom payloads
         </p>
       </div>
 
@@ -175,18 +305,43 @@ const AdminTest: React.FC = () => {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Zap className="h-5 w-5" />
-              Mock Stream
+              Live Device Stream
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Data Source</Label>
+              <Select value={selectedRadio} onValueChange={setSelectedRadio}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select live device" />
+                </SelectTrigger>
+                <SelectContent>
+                  {radioOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value} disabled={opt.disabled}>
+                      <div className="flex items-center gap-2">
+                        <Radio className="h-3 w-3" />
+                        {opt.label}
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {isLoadingDatasources && (
+                <p className="text-xs text-muted-foreground">Loading live datasources...</p>
+              )}
+              {!isLoadingDatasources && radioOptions.length === 0 && (
+                <p className="text-xs text-destructive">No datasources available from backend</p>
+              )}
+            </div>
+
             <div className="flex gap-4">
               <Button
                 onClick={handleStart}
-                disabled={isRunning}
+                disabled={isRunning || !selectedRadio || !hasLiveOptions}
                 className="gap-2"
               >
                 <Play className="h-4 w-4" />
-                Start Mock Stream
+                Start Live Stream
               </Button>
               <Button
                 variant="outline"
@@ -216,8 +371,8 @@ const AdminTest: React.FC = () => {
               </div>
             </div>
 
-            <Badge variant={isRunning ? "default" : "secondary"}>
-              {isRunning ? "Running" : "Stopped"}
+            <Badge variant={isConnected ? "default" : "secondary"}>
+              {isRunning ? streamStatus : "Stopped"}
             </Badge>
           </CardContent>
         </Card>
