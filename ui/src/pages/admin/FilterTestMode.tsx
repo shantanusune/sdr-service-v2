@@ -45,6 +45,33 @@ const MAX_LOG_ENTRIES = 50;
 const TARGET_FPS = 20;
 const FRAME_INTERVAL = 1000 / TARGET_FPS;
 
+function resolveDbWindow(bins: number[]): { minDb: number; maxDb: number } {
+  const sampled: number[] = [];
+  const step = bins.length > 2048 ? 4 : bins.length > 1024 ? 2 : 1;
+  for (let i = 0; i < bins.length; i += step) {
+    const value = bins[i];
+    if (!Number.isFinite(value) || value < -220 || value > 120) continue;
+    sampled.push(value);
+  }
+
+  if (sampled.length === 0) {
+    return { minDb: -120, maxDb: 0 };
+  }
+
+  sampled.sort((a, b) => a - b);
+  const p05 = sampled[Math.max(0, Math.floor(sampled.length * 0.05))];
+  const p98 = sampled[Math.max(0, Math.floor(sampled.length * 0.98))];
+
+  let minDb = Math.floor((p05 - 6) / 5) * 5;
+  let maxDb = Math.ceil((p98 + 3) / 5) * 5;
+  minDb = Math.max(-180, minDb);
+  maxDb = Math.min(60, maxDb);
+  if (maxDb - minDb < 35) {
+    maxDb = minDb + 35;
+  }
+  return { minDb, maxDb };
+}
+
 interface MatchLogEntry {
   ts: number;
   matched: boolean;
@@ -270,8 +297,17 @@ const FilterTestMode: React.FC = () => {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    const bounds = canvas.getBoundingClientRect();
+    const width = Math.max(320, Math.floor(bounds.width || 800));
+    const height = Math.max(220, Math.floor(bounds.height || 300));
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.floor(width * dpr);
+    const pixelHeight = Math.floor(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     // Clear
     ctx.clearRect(0, 0, width, height);
@@ -309,9 +345,8 @@ const FilterTestMode: React.FC = () => {
 
     // Draw spectrum line
     const bins = latestFrame.binsDbm;
-    const minDb = -120;
-    const maxDb = 0;
-    const dbRange = maxDb - minDb;
+    const { minDb, maxDb } = resolveDbWindow(bins);
+    const dbRange = Math.max(1, maxDb - minDb);
 
     ctx.beginPath();
     ctx.strokeStyle = currentMatch ? "#22c55e" : "#3b82f6";
@@ -325,6 +360,12 @@ const FilterTestMode: React.FC = () => {
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
+
+    ctx.fillStyle = "hsl(var(--muted-foreground))";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(`${maxDb.toFixed(0)} dB`, 6, 14);
+    ctx.fillText(`${minDb.toFixed(0)} dB`, 6, height - 6);
 
   }, [latestFrame, filter, currentMatch]);
 

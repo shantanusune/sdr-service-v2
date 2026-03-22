@@ -23,6 +23,35 @@ import { groupDataSourcesByHost, loadSelectedRadios, saveSelectedRadios } from "
 import type { DataSource } from "@/types/sources";
 import { toast } from "@/hooks/use-toast";
 
+function resolveDbWindow(bins: number[]): { minDb: number; maxDb: number } {
+  const sampled: number[] = [];
+  const step = bins.length > 2048 ? 4 : bins.length > 1024 ? 2 : 1;
+  for (let i = 0; i < bins.length; i += step) {
+    const value = bins[i];
+    if (!Number.isFinite(value) || value < -220 || value > 120) continue;
+    sampled.push(value);
+  }
+
+  if (sampled.length === 0) {
+    return { minDb: -120, maxDb: 0 };
+  }
+
+  sampled.sort((a, b) => a - b);
+  const p05 = sampled[Math.max(0, Math.floor(sampled.length * 0.05))];
+  const p98 = sampled[Math.max(0, Math.floor(sampled.length * 0.98))];
+
+  let minDb = Math.floor((p05 - 6) / 5) * 5;
+  let maxDb = Math.ceil((p98 + 3) / 5) * 5;
+
+  minDb = Math.max(-180, minDb);
+  maxDb = Math.min(60, maxDb);
+  if (maxDb - minDb < 35) {
+    maxDb = minDb + 35;
+  }
+
+  return { minDb, maxDb };
+}
+
 const AdminTest: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -235,8 +264,17 @@ const AdminTest: React.FC = () => {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    const bounds = canvas.getBoundingClientRect();
+    const width = Math.max(320, Math.floor(bounds.width || 512));
+    const height = Math.max(180, Math.floor(bounds.height || 200));
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.floor(width * dpr);
+    const pixelHeight = Math.floor(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     ctx.fillStyle = "hsl(var(--background))";
     ctx.fillRect(0, 0, width, height);
@@ -253,8 +291,8 @@ const AdminTest: React.FC = () => {
     }
 
     const bins = lastFrame.binsDbm;
-    const minDb = -120;
-    const maxDb = -20;
+    const { minDb, maxDb } = resolveDbWindow(bins);
+    const dbRange = Math.max(1, maxDb - minDb);
 
     ctx.strokeStyle = "#22c55e";
     ctx.lineWidth = 1.5;
@@ -262,7 +300,7 @@ const AdminTest: React.FC = () => {
 
     for (let i = 0; i < bins.length; i++) {
       const x = (i / bins.length) * width;
-      const normalized = (bins[i] - minDb) / (maxDb - minDb);
+      const normalized = Math.max(0, Math.min(1, (bins[i] - minDb) / dbRange));
       const y = height - normalized * height;
 
       if (i === 0) {
@@ -273,6 +311,12 @@ const AdminTest: React.FC = () => {
     }
 
     ctx.stroke();
+
+    ctx.fillStyle = "hsl(var(--muted-foreground))";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(`${maxDb.toFixed(0)} dB`, 6, 14);
+    ctx.fillText(`${minDb.toFixed(0)} dB`, 6, height - 6);
   }, [lastFrame]);
 
   const samplePayload = JSON.stringify(
