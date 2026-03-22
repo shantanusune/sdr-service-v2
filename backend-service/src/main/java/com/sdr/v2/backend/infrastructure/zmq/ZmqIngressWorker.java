@@ -169,11 +169,11 @@ public class ZmqIngressWorker implements SmartLifecycle {
         SpectrumFrame spectrumFrame = spectrum.onIqFrame(frame);
         if (spectrumFrame != null) {
             registry.onSpectrumFrame(spectrumFrame);
-            streamHub.publish(topic(machineId, deviceId, "spectrum"), spectrumCodec.encode(spectrumFrame));
+            safePublish(topic(machineId, deviceId, "spectrum"), spectrumCodec.encode(spectrumFrame));
         }
 
         // Raw path forwards native frame bytes as-is.
-        streamHub.publish(topic(machineId, deviceId, "rawfeed"), payload);
+        safePublish(topic(machineId, deviceId, "rawfeed"), payload);
     }
 
     private void handleNativeSpectrum(String machineId, String deviceId, byte[] payload) {
@@ -217,7 +217,16 @@ public class ZmqIngressWorker implements SmartLifecycle {
 
         if (frame != null) {
             registry.onSpectrumFrame(frame);
-            streamHub.publish(topic(machineId, deviceId, "spectrum"), spectrumCodec.encode(frame));
+            safePublish(topic(machineId, deviceId, "spectrum"), spectrumCodec.encode(frame));
+        }
+    }
+
+    private void safePublish(String topic, byte[] payload) {
+        try {
+            streamHub.publish(topic, payload);
+        } catch (Exception e) {
+            // Stream publish errors must never terminate ZMQ ingress.
+            log.debug("Stream publish failed topic={}", topic, e);
         }
     }
 

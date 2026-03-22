@@ -392,6 +392,8 @@ int main(int argc, char** argv) {
 
     uint64_t now_ns = now_monotonic_ns();
     if (next_heartbeat_ns == 0 || now_ns >= next_heartbeat_ns) {
+      publish_host_meta(&ctx);
+      publish_topics_meta(&ctx);
       publish_service_meta(&ctx, "RUNNING");
       publish_devices_meta(&ctx, "RUNNING", 1);
       next_heartbeat_ns = now_ns + g_heartbeat_interval_ns;

@@ -42,7 +42,7 @@ public class StreamHub {
             }
             try {
                 session.sendMessage(msg);
-            } catch (IOException ignored) {
+            } catch (Exception ignored) {
                 removeSubscriber(topic, session);
             }
         }
