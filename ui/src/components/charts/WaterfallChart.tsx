@@ -1,11 +1,13 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import ReactECharts from 'echarts-for-react';
+import type { EChartsOption } from 'echarts';
 import type { SpectrumFrame } from '@/types/sdr';
 
 interface WaterfallChartProps {
   frame: SpectrumFrame | null;
   title?: string;
-  width?: number;
-  height?: number;
+  width?: number | string;
+  height?: number | string;
   maxRows?: number;
   className?: string;
 }
@@ -13,68 +15,46 @@ interface WaterfallChartProps {
 interface WaterfallRow {
   ts: number;
   bins: Float32Array;
-  signature: string;
 }
 
-const WATERFALL_STOPS = [
-  { pos: 0.0, rgb: [4, 10, 26] },
-  { pos: 0.15, rgb: [15, 37, 88] },
-  { pos: 0.35, rgb: [29, 97, 170] },
-  { pos: 0.55, rgb: [34, 169, 170] },
-  { pos: 0.72, rgb: [84, 196, 86] },
-  { pos: 0.86, rgb: [234, 202, 74] },
-  { pos: 0.94, rgb: [240, 120, 56] },
-  { pos: 1.0, rgb: [245, 245, 245] },
-] as const;
+const APPEND_INTERVAL_MS = 33;
+const MAX_SAMPLED_VALUES = 24000;
+const GRID_COLOR = 'rgba(180, 195, 220, 0.20)';
+const COLOR_SCALE = [
+  '#040b17',
+  '#0d2f5f',
+  '#1456a2',
+  '#1d96c4',
+  '#34c18f',
+  '#8fd84f',
+  '#f0ca3a',
+  '#f08a31',
+  '#f24e1e',
+  '#fff2e8',
+];
 
-const WATERFALL_PALETTE: Array<[number, number, number]> = buildPalette();
-const GRID_COLOR = 'rgba(200, 210, 230, 0.22)';
-const AXIS_COLOR = 'rgba(215, 225, 240, 0.9)';
-const LABEL_COLOR = 'rgba(190, 205, 225, 0.9)';
-
-function buildPalette(size = 256): Array<[number, number, number]> {
-  const out: Array<[number, number, number]> = [];
-
-  for (let i = 0; i < size; i++) {
-    const t = i / (size - 1);
-    let left = WATERFALL_STOPS[0];
-    let right = WATERFALL_STOPS[WATERFALL_STOPS.length - 1];
-
-    for (let s = 0; s < WATERFALL_STOPS.length; s++) {
-      if (WATERFALL_STOPS[s].pos <= t) {
-        left = WATERFALL_STOPS[s];
-      }
-      if (WATERFALL_STOPS[s].pos >= t) {
-        right = WATERFALL_STOPS[s];
-        break;
-      }
-    }
-
-    if (left.pos === right.pos) {
-      out.push([left.rgb[0], left.rgb[1], left.rgb[2]]);
-      continue;
-    }
-
-    const localT = (t - left.pos) / (right.pos - left.pos);
-    const r = Math.round(left.rgb[0] + (right.rgb[0] - left.rgb[0]) * localT);
-    const g = Math.round(left.rgb[1] + (right.rgb[1] - left.rgb[1]) * localT);
-    const b = Math.round(left.rgb[2] + (right.rgb[2] - left.rgb[2]) * localT);
-    out.push([r, g, b]);
-  }
-
-  return out;
+function frameSignature(frame: SpectrumFrame): string {
+  const bins = frame.binsDbm;
+  const n = bins.length;
+  const first = n > 0 ? Number(bins[0]) : 0;
+  const mid = n > 1 ? Number(bins[Math.floor(n / 2)]) : 0;
+  const last = n > 0 ? Number(bins[n - 1]) : 0;
+  return `${frame.ts}:${frame.centerHz}:${frame.spanHz}:${n}:${first.toFixed(2)}:${mid.toFixed(2)}:${last.toFixed(2)}`;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function computeDbRange(rows: WaterfallRow[]): { minDb: number; maxDb: number; dbRange: number } {
+function computeDbRange(rows: WaterfallRow[]): { minDb: number; maxDb: number } {
   const values: number[] = [];
+
+  const totalBins = rows.reduce((sum, row) => sum + row.bins.length, 0);
+  const stepHint = Math.max(1, Math.floor(totalBins / MAX_SAMPLED_VALUES));
 
   for (const row of rows) {
     const bins = row.bins;
-    for (let i = 0; i < bins.length; i++) {
+    const step = Math.max(
+      stepHint,
+      bins.length > 4096 ? 16 : bins.length > 2048 ? 8 : bins.length > 1024 ? 4 : bins.length > 512 ? 2 : 1
+    );
+    for (let i = 0; i < bins.length; i += step) {
       const value = bins[i];
       if (!Number.isFinite(value) || value < -220 || value > 120) {
         continue;
@@ -84,255 +64,261 @@ function computeDbRange(rows: WaterfallRow[]): { minDb: number; maxDb: number; d
   }
 
   if (values.length === 0) {
-    return { minDb: -120, maxDb: 10, dbRange: 130 };
+    return { minDb: -120, maxDb: 10 };
   }
 
   values.sort((a, b) => a - b);
-  const p10 = values[Math.floor(values.length * 0.1)];
-  const p98 = values[Math.floor(values.length * 0.98)];
 
-  let minDb = Number.isFinite(p10) ? p10 : values[0];
-  let maxDb = Number.isFinite(p98) ? p98 : values[values.length - 1];
+  const p05 = values[Math.max(0, Math.floor(values.length * 0.05))];
+  const p995 = values[Math.max(0, Math.floor(values.length * 0.995) - 1)];
 
-  // Keep sane waterfall range for visual contrast.
-  minDb = Math.max(-180, minDb - 4);
-  maxDb = Math.min(40, maxDb + 2);
+  let minDb = Number.isFinite(p05) ? p05 - 3 : values[0];
+  let maxDb = Number.isFinite(p995) ? p995 + 2 : values[values.length - 1];
 
-  minDb = Math.floor(minDb / 5) * 5;
-  maxDb = Math.ceil(maxDb / 5) * 5;
+  minDb = Math.max(-180, Math.floor(minDb / 5) * 5);
+  maxDb = Math.min(40, Math.ceil(maxDb / 5) * 5);
 
   if (maxDb - minDb < 20) {
     maxDb = minDb + 20;
   }
 
-  return {
-    minDb,
-    maxDb,
-    dbRange: maxDb - minDb,
-  };
-}
-
-function frameSignature(frame: SpectrumFrame): string {
-  const bins = frame.binsDbm;
-  const n = bins.length;
-  const a = n > 0 ? Number(bins[0]) : 0;
-  const b = n > 1 ? Number(bins[Math.floor(n / 2)]) : 0;
-  const c = n > 0 ? Number(bins[n - 1]) : 0;
-  return `${frame.ts}:${frame.frameId ?? ''}:${frame.centerHz}:${frame.spanHz}:${n}:${a.toFixed(2)}:${b.toFixed(2)}:${c.toFixed(2)}`;
+  return { minDb, maxDb };
 }
 
 export const WaterfallChart: React.FC<WaterfallChartProps> = ({
   frame,
   title,
-  width = 900,
+  width = '100%',
   height = 360,
-  maxRows = 512,
+  maxRows = 360,
   className,
 }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rowsRef = useRef<WaterfallRow[]>([]);
-  const lastSignatureRef = useRef<string>('');
-
-  const drawChart = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, width, height);
-
-    const padding = { top: 26, right: 120, bottom: 48, left: 58 };
-    const colorBarWidth = 12;
-    const colorBarGap = 10;
-    const chartWidth = Math.max(1, Math.floor(width - padding.left - padding.right));
-    const chartHeight = Math.max(1, Math.floor(height - padding.top - padding.bottom));
-    const chartWidthPx = Math.max(1, Math.floor(chartWidth * dpr));
-    const chartHeightPx = Math.max(1, Math.floor(chartHeight * dpr));
-
-    const rows = rowsRef.current;
-    if (rows.length === 0) {
-      ctx.fillStyle = LABEL_COLOR;
-      ctx.font = '12px monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('Waiting for raw IQ frames...', width / 2, height / 2);
-      return;
-    }
-
-    const { minDb, maxDb, dbRange } = computeDbRange(rows);
-
-    // putImageData operates in device pixels (ignores transform), so render in px.
-    const image = ctx.createImageData(chartWidthPx, chartHeightPx);
-    const pixels = image.data;
-
-    const renderRows = Math.min(chartHeightPx, rows.length);
-    const startIndex = Math.max(0, rows.length - renderRows);
-    const yOffset = chartHeightPx - renderRows;
-
-    for (let py = 0; py < renderRows; py++) {
-      const rowIndex = startIndex + py;
-      const row = rows[rowIndex];
-      const bins = row.bins;
-      const binsLen = bins.length;
-      const y = yOffset + py; // keep newest near bottom while history grows
-
-      for (let x = 0; x < chartWidthPx; x++) {
-        const binIndex = Math.min(binsLen - 1, Math.floor((x / chartWidthPx) * binsLen));
-        const db = bins[binIndex];
-        const normalized = Number.isFinite(db) ? (db - minDb) / dbRange : 0;
-        const paletteIndex = clamp(Math.round(normalized * 255), 0, 255);
-        const [r, g, b] = WATERFALL_PALETTE[paletteIndex];
-
-        const px = (y * chartWidthPx + x) * 4;
-        pixels[px] = r;
-        pixels[px + 1] = g;
-        pixels[px + 2] = b;
-        pixels[px + 3] = 255;
-      }
-    }
-
-    ctx.putImageData(image, Math.round(padding.left * dpr), Math.round(padding.top * dpr));
-
-    // Grid overlay
-    ctx.strokeStyle = GRID_COLOR;
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 10; i++) {
-      const x = padding.left + (chartWidth * i) / 10;
-      ctx.beginPath();
-      ctx.moveTo(x, padding.top);
-      ctx.lineTo(x, padding.top + chartHeight);
-      ctx.stroke();
-    }
-    for (let i = 0; i <= 10; i++) {
-      const y = padding.top + (chartHeight * i) / 10;
-      ctx.beginPath();
-      ctx.moveTo(padding.left, y);
-      ctx.lineTo(padding.left + chartWidth, y);
-      ctx.stroke();
-    }
-
-    const latest = rows[rows.length - 1];
-    const oldest = rows[0];
-
-    // Border
-    ctx.strokeStyle = AXIS_COLOR;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(padding.left, padding.top, chartWidth, chartHeight);
-
-    // Color bar
-    const cbX = padding.left + chartWidth + colorBarGap;
-    const cbY = padding.top;
-    const gradient = ctx.createLinearGradient(0, cbY, 0, cbY + chartHeight);
-    gradient.addColorStop(0.0, 'rgb(245,245,245)');
-    gradient.addColorStop(0.1, 'rgb(240,120,56)');
-    gradient.addColorStop(0.25, 'rgb(234,202,74)');
-    gradient.addColorStop(0.45, 'rgb(84,196,86)');
-    gradient.addColorStop(0.65, 'rgb(34,169,170)');
-    gradient.addColorStop(0.82, 'rgb(29,97,170)');
-    gradient.addColorStop(1.0, 'rgb(4,10,26)');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(cbX, cbY, colorBarWidth, chartHeight);
-    ctx.strokeStyle = AXIS_COLOR;
-    ctx.strokeRect(cbX, cbY, colorBarWidth, chartHeight);
-
-    // Title
-    ctx.fillStyle = AXIS_COLOR;
-    ctx.font = '18px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(title || 'Waterfall History', width / 2, 22);
-
-    // Axes labels and ticks
-    ctx.fillStyle = LABEL_COLOR;
-    ctx.font = '11px monospace';
-    const yTicks = 10;
-    ctx.textAlign = 'right';
-    for (let i = 0; i <= yTicks; i++) {
-      const ratio = i / yTicks;
-      const y = padding.top + chartHeight * ratio;
-      const sweep = -Math.round(renderRows * (1 - ratio));
-      ctx.fillText(`${sweep}`, padding.left - 6, y + 4);
-    }
-
-    ctx.save();
-    ctx.translate(12, padding.top + chartHeight / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillText('Sweep', 0, 0);
-    ctx.restore();
-
-    if (frame && Number.isFinite(frame.centerHz) && Number.isFinite(frame.spanHz) && frame.spanHz > 0) {
-      const startMHz = (frame.centerHz - frame.spanHz / 2) / 1e6;
-      const endMHz = (frame.centerHz + frame.spanHz / 2) / 1e6;
-
-      ctx.textAlign = 'center';
-      for (let i = 0; i <= 10; i++) {
-        const x = padding.left + (chartWidth * i) / 10;
-        const freq = startMHz + ((endMHz - startMHz) * i) / 10;
-        ctx.fillText(`${Math.round(freq)} MHz`, x, height - 10);
-      }
-
-      ctx.textAlign = 'center';
-      ctx.fillText('Frequency', padding.left + chartWidth / 2, height - 24);
-
-      ctx.textAlign = 'left';
-      ctx.fillText(`Start: ${Math.round(startMHz)} MHz`, 4, height - 2);
-
-      ctx.textAlign = 'right';
-      ctx.fillText(`Stop: ${Math.round(endMHz)} MHz`, width - 4, height - 2);
-    }
-
-    // Color bar dB labels
-    ctx.textAlign = 'left';
-    ctx.fillText(`${maxDb.toFixed(0)} dB`, cbX + colorBarWidth + 4, cbY + 10);
-    ctx.fillText(`${((maxDb + minDb) / 2).toFixed(0)} dB`, cbX + colorBarWidth + 4, cbY + chartHeight / 2 + 4);
-    ctx.fillText(`${minDb.toFixed(0)} dB`, cbX + colorBarWidth + 4, cbY + chartHeight - 2);
-
-    const spanSec = Math.max(0, (latest.ts - oldest.ts) / 1000);
-    ctx.textAlign = 'left';
-    ctx.fillText(`History ${spanSec.toFixed(1)}s`, padding.left, padding.top - 8);
-  }, [frame, width, height, title]);
+  const [rows, setRows] = useState<WaterfallRow[]>([]);
+  const lastSigRef = useRef('');
+  const lastAppendRef = useRef(0);
+  const metaRef = useRef<{ bins: number; centerHz: number; spanHz: number } | null>(null);
 
   useEffect(() => {
     if (!frame || !frame.binsDbm || frame.binsDbm.length === 0) {
-      drawChart();
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastAppendRef.current < APPEND_INTERVAL_MS) {
       return;
     }
 
     const signature = frameSignature(frame);
-    if (signature === lastSignatureRef.current) {
+    if (signature === lastSigRef.current) {
       return;
     }
-    lastSignatureRef.current = signature;
 
-    rowsRef.current.push({
-      ts: Number.isFinite(frame.ts) ? frame.ts : Date.now(),
-      bins: Float32Array.from(frame.binsDbm),
-      signature,
+    const binsCount = frame.binsDbm.length;
+    const currentMeta = metaRef.current;
+    const freqChanged =
+      currentMeta !== null &&
+      (currentMeta.bins !== binsCount ||
+        Math.abs(currentMeta.centerHz - frame.centerHz) > Math.max(1, frame.binHz) ||
+        Math.abs(currentMeta.spanHz - frame.spanHz) > Math.max(1, frame.binHz));
+
+    metaRef.current = {
+      bins: binsCount,
+      centerHz: frame.centerHz,
+      spanHz: frame.spanHz,
+    };
+
+    lastSigRef.current = signature;
+    lastAppendRef.current = now;
+
+    setRows((prev) => {
+      const nextBase = freqChanged ? [] : prev;
+      const next = [...nextBase, { ts: Number.isFinite(frame.ts) ? frame.ts : now, bins: Float32Array.from(frame.binsDbm) }];
+      return next.length > maxRows ? next.slice(next.length - maxRows) : next;
     });
+  }, [frame, maxRows]);
 
-    if (rowsRef.current.length > maxRows) {
-      rowsRef.current = rowsRef.current.slice(rowsRef.current.length - maxRows);
+  const option: EChartsOption = useMemo(() => {
+    if (!frame || rows.length === 0) {
+      return {
+        backgroundColor: '#000000',
+        title: {
+          text: title || 'Waterfall History',
+          left: 'center',
+          top: 6,
+          textStyle: { color: '#b8c2d6', fontSize: 16, fontWeight: 500 },
+        },
+      };
     }
 
-    drawChart();
-  }, [frame, maxRows, drawChart]);
+    const binsCount = Math.max(1, rows[rows.length - 1]?.bins.length ?? frame.binsDbm.length);
+    const rowCount = rows.length;
+    const { minDb, maxDb } = computeDbRange(rows);
+    const startHz = frame.centerHz - frame.spanHz / 2;
+    const endHz = frame.centerHz + frame.spanHz / 2;
+    const startMHz = startHz / 1e6;
+    const endMHz = endHz / 1e6;
 
-  useEffect(() => {
-    drawChart();
-  }, [drawChart]);
+    const heatmapData: number[][] = [];
+    for (let r = 0; r < rowCount; r++) {
+      const row = rows[r];
+      const bins = row.bins;
+      const srcCount = bins.length;
+      if (srcCount === 0) {
+        continue;
+      }
+
+      if (srcCount === binsCount) {
+        for (let x = 0; x < binsCount; x++) {
+          const v = Number(bins[x]);
+          heatmapData.push([x, r, Number.isFinite(v) ? v : minDb]);
+        }
+        continue;
+      }
+
+      const ratio = srcCount / binsCount;
+      for (let x = 0; x < binsCount; x++) {
+        const srcX = Math.min(srcCount - 1, Math.floor(x * ratio));
+        const v = Number(bins[srcX]);
+        heatmapData.push([x, r, Number.isFinite(v) ? v : minDb]);
+      }
+    }
+
+    const xCategories = Array.from({ length: binsCount }, (_, i) => i);
+    const yCategories = Array.from({ length: rowCount }, (_, i) => i);
+    const xLabelInterval = Math.max(1, Math.floor(binsCount / 10));
+    const yLabelInterval = Math.max(1, Math.floor(rowCount / 8));
+
+    return {
+      backgroundColor: '#000000',
+      animation: false,
+      title: {
+        text: title || 'Waterfall History',
+        left: 'center',
+        top: 4,
+        textStyle: { color: '#b8c2d6', fontSize: 16, fontWeight: 500 },
+      },
+      grid: {
+        left: 64,
+        right: 108,
+        top: 34,
+        bottom: 64,
+      },
+      tooltip: {
+        trigger: 'item',
+        backgroundColor: '#0a101f',
+        borderColor: '#2a3a5a',
+        textStyle: { color: '#dbe5ff' },
+        formatter: (params: any) => {
+          const x = Number(params.value?.[0] ?? 0);
+          const y = Number(params.value?.[1] ?? 0);
+          const db = Number(params.value?.[2] ?? 0);
+          const hz = startHz + ((endHz - startHz) * x) / Math.max(1, binsCount - 1);
+          return `Freq: ${(hz / 1e6).toFixed(3)} MHz<br/>Sweep: -${rowCount - y}<br/>Power: ${db.toFixed(1)} dB`;
+        },
+      },
+      xAxis: {
+        type: 'category',
+        data: xCategories,
+        boundaryGap: false,
+        axisLine: { lineStyle: { color: '#8ea2c6' } },
+        axisTick: { show: true },
+        axisLabel: {
+          color: '#9fb2d6',
+          interval: xLabelInterval,
+          formatter: (_value: number, index: number) => {
+            const hz = startHz + ((endHz - startHz) * index) / Math.max(1, binsCount - 1);
+            return `${(hz / 1e6).toFixed(2)} MHz`;
+          },
+        },
+        splitLine: { show: true, lineStyle: { color: GRID_COLOR } },
+        name: 'Frequency',
+        nameLocation: 'middle',
+        nameGap: 42,
+        nameTextStyle: { color: '#a9bbdc' },
+      },
+      yAxis: {
+        type: 'category',
+        data: yCategories,
+        inverse: true,
+        axisLine: { lineStyle: { color: '#8ea2c6' } },
+        axisLabel: {
+          color: '#9fb2d6',
+          interval: yLabelInterval,
+          formatter: (_value: number, index: number) => `-${rowCount - index}`,
+        },
+        splitLine: { show: true, lineStyle: { color: GRID_COLOR } },
+        name: 'Sweep',
+        nameLocation: 'middle',
+        nameGap: 48,
+        nameTextStyle: { color: '#a9bbdc' },
+      },
+      visualMap: {
+        min: minDb,
+        max: maxDb,
+        calculable: false,
+        orient: 'vertical',
+        right: 18,
+        top: 'middle',
+        textStyle: { color: '#9fb2d6' },
+        inRange: { color: COLOR_SCALE },
+      },
+      series: [
+        {
+          type: 'heatmap',
+          data: heatmapData,
+          progressive: 75000,
+          animation: false,
+          emphasis: { disabled: true },
+        },
+      ],
+      graphic: [
+        {
+          type: 'text',
+          left: 8,
+          bottom: 8,
+          style: {
+            text: `Start: ${Math.round(startMHz)} MHz`,
+            fill: '#9fb2d6',
+            font: '12px monospace',
+          },
+        },
+        {
+          type: 'text',
+          right: 8,
+          bottom: 8,
+          style: {
+            text: `Stop: ${Math.round(endMHz)} MHz`,
+            fill: '#9fb2d6',
+            font: '12px monospace',
+            textAlign: 'right',
+          },
+        },
+      ],
+    };
+  }, [frame, rows, title]);
+
+  const chartOpts = useMemo(
+    () => ({
+      renderer: 'canvas' as const,
+      devicePixelRatio:
+        typeof window === 'undefined'
+          ? 2
+          : Math.max(2, Math.floor(window.devicePixelRatio || 1)),
+    }),
+    []
+  );
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{ width, height }}
-      className={className || 'rounded-lg border border-border/40'}
-    />
+    <div className={className || 'rounded-lg border border-border/40 overflow-hidden'} style={{ width, height }}>
+      <ReactECharts
+        option={option}
+        notMerge
+        lazyUpdate
+        opts={chartOpts}
+        autoResize
+        style={{ width: '100%', height: '100%' }}
+      />
+    </div>
   );
 };
 

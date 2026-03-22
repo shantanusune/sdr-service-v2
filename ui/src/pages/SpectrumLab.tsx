@@ -809,8 +809,7 @@ const SpectrumLab: React.FC = () => {
                             <p className="text-xs text-muted-foreground">{waterfall.name}</p>
                             <WaterfallChart
                               frame={waterfall.frame}
-                              width={900}
-                              height={300}
+                              height={320}
                             />
                           </div>
                         ))}

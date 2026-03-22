@@ -39,7 +39,7 @@ const RDSD_MAGIC = 0x44534452;
 const DEFAULT_CENTER_HZ = 100e6;  // 100 MHz
 const DEFAULT_SPAN_HZ = 20e6;     // 20 MHz span
 const RAW_MIN_NFFT = 128;
-const RAW_MAX_NFFT = 1024;
+const RAW_MAX_NFFT = 4096;
 
 /**
  * Validate if header values are reasonable
@@ -185,11 +185,14 @@ function parseNativeRawIqFrame(buffer: ArrayBuffer): BinarySpectrumFrame | null 
 
     fft(re, im);
 
-    const binsCount = nfft / 2;
+    const binsCount = nfft;
     const binsDbm = new Float32Array(binsCount);
+    const magScale = 1.0 / (nfft * nfft);
     for (let k = 0; k < binsCount; k++) {
-      const mag2 = re[k] * re[k] + im[k] * im[k];
-      binsDbm[k] = 10 * Math.log10(mag2 + 1e-12);
+      // Shift FFT so output bins map from -Fs/2..+Fs/2 around center frequency.
+      const shifted = (k + nfft / 2) & (nfft - 1);
+      const mag2 = (re[shifted] * re[shifted] + im[shifted] * im[shifted]) * magScale;
+      binsDbm[k] = 10 * Math.log10(mag2 + 1e-15);
     }
 
     const parsedCenterHz = centerFreqHz > 1e3 && centerFreqHz < 1e12
