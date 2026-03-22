@@ -75,6 +75,11 @@ const FilterTestMode: React.FC = () => {
   const { testFilter, isReady: workerReady } = useFilterWorker();
   const { data: rawDatasources = [], isLoading: isLoadingDatasources } = useStreamableDatasources();
   const dataSources = useMemo(() => groupDataSourcesByHost(rawDatasources), [rawDatasources]);
+  const isRadioSelectable = useCallback((source: DataSource, radioId: string): boolean => {
+    const radio = source.radios.find((r) => r.id === radioId);
+    const wsBase = String(radio?.meta?.wsEndpoint || source.endpoint || "").trim();
+    return wsBase.length > 0;
+  }, []);
 
   const getSourceAndRadio = useCallback(
     (radioKey: string): { source: DataSource; radioId: string } | null => {
@@ -131,7 +136,7 @@ const FilterTestMode: React.FC = () => {
     const availableRadios = dataSources.flatMap((source) =>
       source.radios.map((radio) => ({
         key: `${source.id}:${radio.id}`,
-        disabled: Boolean(radio.meta?.disabled),
+        disabled: !isRadioSelectable(source, radio.id),
       }))
     );
 
@@ -152,7 +157,7 @@ const FilterTestMode: React.FC = () => {
 
     const firstEnabled = availableRadios.find((r) => !r.disabled) ?? availableRadios[0];
     setSelectedRadio(firstEnabled.key);
-  }, [dataSources, selectedRadio]);
+  }, [dataSources, selectedRadio, isRadioSelectable]);
 
   useEffect(() => {
     if (!selectedRadio) return;
@@ -202,13 +207,6 @@ const FilterTestMode: React.FC = () => {
     if (!selected) return;
     const { source, radioId } = selected;
     const [sourceId] = selectedRadio.split(":");
-
-    const radio = source.radios.find((r) => r.id === radioId);
-    if (radio?.meta?.disabled) {
-      setStreamConnected(false);
-      setStreamStatus("Selected radio is offline");
-      return;
-    }
 
     let cancelled = false;
     const connect = async (): Promise<void> => {
@@ -357,7 +355,7 @@ const FilterTestMode: React.FC = () => {
     source.radios.map((radio) => ({
       value: `${source.id}:${radio.id}`,
       label: `${source.name} / ${radio.name}`,
-      disabled: Boolean(radio.meta?.disabled),
+      disabled: !isRadioSelectable(source, radio.id),
     }))
   );
 

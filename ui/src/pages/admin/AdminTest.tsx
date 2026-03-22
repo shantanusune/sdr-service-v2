@@ -41,6 +41,11 @@ const AdminTest: React.FC = () => {
   const { evaluate: evaluateFilters, isReady: workerReady } = useFilterWorker();
   const { data: rawDatasources = [], isLoading: isLoadingDatasources } = useStreamableDatasources();
   const dataSources = useMemo(() => groupDataSourcesByHost(rawDatasources), [rawDatasources]);
+  const isRadioSelectable = useCallback((source: DataSource, radioId: string): boolean => {
+    const radio = source.radios.find((r) => r.id === radioId);
+    const wsBase = String(radio?.meta?.wsEndpoint || source.endpoint || "").trim();
+    return wsBase.length > 0;
+  }, []);
 
   const getSourceAndRadio = useCallback(
     (radioKey: string): { source: DataSource; sourceId: string; radioId: string } | null => {
@@ -50,7 +55,7 @@ const AdminTest: React.FC = () => {
       const source = dataSources.find((s) => s.id === sourceId);
       if (!source) return null;
       const radio = source.radios.find((r) => r.id === radioId);
-      if (!radio || radio.meta?.disabled) return null;
+      if (!radio) return null;
       return { source, sourceId, radioId };
     },
     [dataSources]
@@ -79,7 +84,7 @@ const AdminTest: React.FC = () => {
     const available = dataSources.flatMap((source) =>
       source.radios.map((radio) => ({
         key: `${source.id}:${radio.id}`,
-        disabled: Boolean(radio.meta?.disabled),
+        disabled: !isRadioSelectable(source, radio.id),
       }))
     );
 
@@ -97,7 +102,7 @@ const AdminTest: React.FC = () => {
 
     const firstEnabled = available.find((d) => !d.disabled) ?? available[0];
     setSelectedRadio(firstEnabled.key);
-  }, [dataSources, selectedRadio]);
+  }, [dataSources, selectedRadio, isRadioSelectable]);
 
   useEffect(() => {
     if (!selectedRadio) return;
@@ -285,7 +290,7 @@ const AdminTest: React.FC = () => {
     source.radios.map((radio) => ({
       value: `${source.id}:${radio.id}`,
       label: `${source.name} / ${radio.name}`,
-      disabled: Boolean(radio.meta?.disabled),
+      disabled: !isRadioSelectable(source, radio.id),
     }))
   );
   const hasLiveOptions = radioOptions.some((opt) => !opt.disabled);
