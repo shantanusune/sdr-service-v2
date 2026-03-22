@@ -3,7 +3,7 @@
  * 
  * Parses binary spectrum data from WebSocket.
  * 
- * Supports two formats:
+ * Supports three formats:
  * 
  * Format A - Header + bins (28 byte header):
  *   - timestamp: Float64 (8 bytes) - Unix timestamp in ms
@@ -15,6 +15,12 @@
  * Format B - Raw Float32 bins only:
  *   - No header, just raw Float32 power values
  *   - Uses default frequency parameters
+ *
+ * Format C - Native RDSD raw IQ frame (48 byte header + IQ payload):
+ *   - header magic: 0x44534452 ("RDSD", little-endian)
+ *   - center/sample rate/timestamp metadata in header
+ *   - payload is interleaved IQ bytes
+ *   - parser derives one FFT power row for waterfall rendering
  */
 
 export interface BinarySpectrumFrame {
@@ -26,10 +32,14 @@ export interface BinarySpectrumFrame {
 }
 
 const HEADER_SIZE = 28;
+const RDSD_HEADER_SIZE = 48;
+const RDSD_MAGIC = 0x44534452;
 
 // Default frequency params when header is invalid or missing
 const DEFAULT_CENTER_HZ = 100e6;  // 100 MHz
 const DEFAULT_SPAN_HZ = 20e6;     // 20 MHz span
+const RAW_MIN_NFFT = 128;
+const RAW_MAX_NFFT = 1024;
 
 /**
  * Validate if header values are reasonable
@@ -50,9 +60,161 @@ function isValidDbm(value: number): boolean {
   return isFinite(value) && value >= -200 && value <= 50;
 }
 
+function readUint64LE(view: DataView, offset: number): bigint {
+  const lo = BigInt(view.getUint32(offset, true));
+  const hi = BigInt(view.getUint32(offset + 4, true));
+  return (hi << 32n) | lo;
+}
+
+function highestPowerOfTwoAtMost(value: number): number {
+  let p2 = 1;
+  while ((p2 << 1) <= value) {
+    p2 <<= 1;
+  }
+  return p2;
+}
+
+function decodeIqSample(raw: number, iqFormat: number): number {
+  if (iqFormat === 1) {
+    const signed = raw > 127 ? raw - 256 : raw;
+    return signed / 128.0;
+  }
+  return (raw - 127.5) / 128.0;
+}
+
+function fft(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; (j & bit) !== 0; bit >>= 1) {
+      j ^= bit;
+    }
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i];
+      re[i] = re[j];
+      re[j] = tr;
+      const ti = im[i];
+      im[i] = im[j];
+      im[j] = ti;
+    }
+  }
+
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2.0 * Math.PI) / len;
+    const wLenRe = Math.cos(ang);
+    const wLenIm = Math.sin(ang);
+
+    for (let i = 0; i < n; i += len) {
+      let wRe = 1.0;
+      let wIm = 0.0;
+
+      for (let j = 0; j < len / 2; j++) {
+        const u = i + j;
+        const v = i + j + len / 2;
+
+        const vr = re[v] * wRe - im[v] * wIm;
+        const vi = re[v] * wIm + im[v] * wRe;
+
+        re[v] = re[u] - vr;
+        im[v] = im[u] - vi;
+        re[u] = re[u] + vr;
+        im[u] = im[u] + vi;
+
+        const nextRe = wRe * wLenRe - wIm * wLenIm;
+        const nextIm = wRe * wLenIm + wIm * wLenRe;
+        wRe = nextRe;
+        wIm = nextIm;
+      }
+    }
+  }
+}
+
+function parseNativeRawIqFrame(buffer: ArrayBuffer): BinarySpectrumFrame | null {
+  if (buffer.byteLength < RDSD_HEADER_SIZE) {
+    return null;
+  }
+
+  const view = new DataView(buffer);
+  const magic = view.getUint32(0, true);
+  if (magic !== RDSD_MAGIC) {
+    return null;
+  }
+
+  try {
+    const centerFreqHz = Number(readUint64LE(view, 8));
+    const sampleRateHz = view.getUint32(16, true);
+    const timestampNs = readUint64LE(view, 20);
+    const payloadLen = view.getUint32(36, true);
+    const iqFormat = view.getUint8(40);
+
+    const availablePayload = Math.max(0, buffer.byteLength - RDSD_HEADER_SIZE);
+    const iqLen = Math.min(payloadLen, availablePayload);
+    const iqPairs = Math.floor(iqLen / 2);
+    if (iqPairs < RAW_MIN_NFFT) {
+      return null;
+    }
+
+    const nfft = Math.max(
+      RAW_MIN_NFFT,
+      Math.min(RAW_MAX_NFFT, highestPowerOfTwoAtMost(iqPairs))
+    );
+
+    const iqBytes = new Uint8Array(buffer, RDSD_HEADER_SIZE, iqLen);
+    const re = new Float64Array(nfft);
+    const im = new Float64Array(nfft);
+
+    for (let i = 0; i < nfft; i++) {
+      const ii = i * 2;
+      const qq = ii + 1;
+      if (qq >= iqBytes.length) {
+        break;
+      }
+
+      let iVal = decodeIqSample(iqBytes[ii], iqFormat);
+      let qVal = decodeIqSample(iqBytes[qq], iqFormat);
+
+      const w = 0.5 - 0.5 * Math.cos((2.0 * Math.PI * i) / (nfft - 1));
+      iVal *= w;
+      qVal *= w;
+
+      re[i] = iVal;
+      im[i] = qVal;
+    }
+
+    fft(re, im);
+
+    const binsCount = nfft / 2;
+    const binsDbm = new Float32Array(binsCount);
+    for (let k = 0; k < binsCount; k++) {
+      const mag2 = re[k] * re[k] + im[k] * im[k];
+      binsDbm[k] = 10 * Math.log10(mag2 + 1e-12);
+    }
+
+    const parsedCenterHz = centerFreqHz > 1e3 && centerFreqHz < 1e12
+      ? centerFreqHz
+      : DEFAULT_CENTER_HZ;
+    const parsedSpanHz = sampleRateHz > 0 ? sampleRateHz : DEFAULT_SPAN_HZ;
+    const tsMsBigInt = timestampNs / 1000000n;
+    const parsedTs = Number(tsMsBigInt);
+
+    return {
+      ts: Number.isFinite(parsedTs) && parsedTs > 0 ? parsedTs : Date.now(),
+      centerHz: parsedCenterHz,
+      spanHz: parsedSpanHz,
+      binHz: parsedSpanHz / binsDbm.length,
+      binsDbm,
+    };
+  } catch (e) {
+    console.error('[BinaryParser] Failed to parse native raw IQ frame:', e);
+    return null;
+  }
+}
+
 /**
  * Parse binary ArrayBuffer to SpectrumFrame
- * Tries Format A first, falls back to Format B if header is invalid
+ * Tries Format C first (native IQ), then Format A, then falls back to Format B.
  */
 export function parseBinarySpectrumFrame(buffer: ArrayBuffer): BinarySpectrumFrame | null {
   if (buffer.byteLength < 4) {
@@ -60,6 +222,16 @@ export function parseBinarySpectrumFrame(buffer: ArrayBuffer): BinarySpectrumFra
   }
 
   try {
+    const nativeRawFrame = parseNativeRawIqFrame(buffer);
+    if (nativeRawFrame) {
+      console.debug('[BinaryParser] Format C (native raw IQ):', {
+        centerHz: nativeRawFrame.centerHz / 1e6,
+        spanHz: nativeRawFrame.spanHz / 1e6,
+        binCount: nativeRawFrame.binsDbm.length,
+      });
+      return nativeRawFrame;
+    }
+
     const view = new DataView(buffer);
 
     // Try Format A: Header + bins (28-byte header)

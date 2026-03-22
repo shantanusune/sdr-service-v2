@@ -14,11 +14,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { SpectrumChart, type SpectrumHorizontalMarker } from '@/components/charts/SpectrumChart';
+import { WaterfallChart } from '@/components/charts/WaterfallChart';
 import { useSpectrumWS } from '@/realtime/useSpectrumWS';
 import { useStreamableDatasources } from '@/hooks/useDatasources';
 import { groupDataSourcesByHost } from '@/config/dataSources';
 import { isDisabledState } from '@/types/api';
 import type { SpectrumMarker } from '@/models/types';
+import type { SpectrumFrame } from '@/types/sdr';
 import { http } from '@/api/http';
 
 interface RadioItem {
@@ -27,6 +29,7 @@ interface RadioItem {
   radioKey: string;
   name: string;
   type: string;
+  sourceType: 'rawfeed' | 'spectrum' | 'unknown';
   state: string;
   disabled: boolean;
   centerHz?: number;
@@ -113,6 +116,48 @@ function filterRowsByKind(rows: EventConsoleRow[], eventFilter: EventFilter): Ev
     return rows.filter((row) => row.kind === 'activity');
   }
   return rows;
+}
+
+function resolveStreamType(meta: Record<string, unknown> | undefined): 'rawfeed' | 'spectrum' | 'unknown' {
+  const normalize = (value: unknown): string =>
+    String(value || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
+
+  const rawCandidates = [
+    meta?.sourceType,
+    meta?.wsPath,
+    meta?.wsEndpoint,
+    meta?.mqttTopic,
+    meta?.displayName,
+    meta?.type,
+  ];
+
+  const hasRawfeed = rawCandidates.some((value) => {
+    const normalized = normalize(value);
+    return normalized.includes('rawfeed');
+  });
+  if (hasRawfeed) {
+    return 'rawfeed';
+  }
+
+  const hasSpectrum = rawCandidates.some((value) => {
+    const normalized = normalize(value);
+    return normalized.includes('spectrum');
+  });
+  if (hasSpectrum) {
+    return 'spectrum';
+  }
+
+  const wsPath = String(meta?.wsPath || '').toLowerCase();
+  if (wsPath.endsWith('/rawfeed')) {
+    return 'rawfeed';
+  }
+  if (wsPath.endsWith('/spectrum')) {
+    return 'spectrum';
+  }
+
+  return 'unknown';
 }
 
 const SpectrumLab: React.FC = () => {
@@ -221,6 +266,7 @@ const SpectrumLab: React.FC = () => {
           radioKey,
           name: radio.name,
           type: String(radio.meta?.type || 'Unknown'),
+          sourceType: resolveStreamType(radio.meta as Record<string, unknown> | undefined),
           state,
           disabled: isDisabledState(state),
           centerHz: typeof capabilities?.cf === 'number' ? capabilities.cf : undefined,
@@ -238,6 +284,7 @@ const SpectrumLab: React.FC = () => {
     return allRadios.filter(r =>
       r.name.toLowerCase().includes(query) ||
       r.type.toLowerCase().includes(query) ||
+      r.sourceType.toLowerCase().includes(query) ||
       r.radioId.toLowerCase().includes(query)
     );
   }, [allRadios, searchQuery]);
@@ -287,12 +334,30 @@ const SpectrumLab: React.FC = () => {
     );
   }, []);
 
-  // Prepare chart data from spectrum cache with optional frequency override
-  const chartData = useMemo(() => {
-    return selectedRadios
-      .map(key => spectrumData[key])
+  const selectedRawfeedKeys = useMemo(
+    () =>
+      selectedRadios.filter((radioKey) => {
+        const radio = allRadios.find((r) => r.radioKey === radioKey);
+        return radio?.sourceType === 'rawfeed';
+      }),
+    [selectedRadios, allRadios]
+  );
+
+  const selectedSpectrumKeys = useMemo(
+    () =>
+      selectedRadios.filter((radioKey) => {
+        const radio = allRadios.find((r) => r.radioKey === radioKey);
+        return radio?.sourceType !== 'rawfeed';
+      }),
+    [selectedRadios, allRadios]
+  );
+
+  // Prepare spectrum chart data (line graph) from spectrum-type feeds.
+  const spectrumChartData = useMemo(() => {
+    return selectedSpectrumKeys
+      .map((key) => spectrumData[key])
       .filter(Boolean)
-      .map(item => {
+      .map((item) => {
         const frame = item.frame;
         if (useManualFreq) {
           return {
@@ -304,11 +369,40 @@ const SpectrumLab: React.FC = () => {
         }
         return frame;
       });
-  }, [selectedRadios, spectrumData, useManualFreq, manualCenterMHz, manualSpanMHz]);
+  }, [selectedSpectrumKeys, spectrumData, useManualFreq, manualCenterMHz, manualSpanMHz]);
+
+  const rawfeedWaterfalls = useMemo(() => {
+    return selectedRawfeedKeys
+      .map((key) => {
+        const item = spectrumData[key];
+        if (!item) {
+          return null;
+        }
+
+        const radio = allRadios.find((r) => r.radioKey === key);
+        const frame = item.frame;
+        let resolvedFrame: SpectrumFrame = frame;
+        if (useManualFreq) {
+          resolvedFrame = {
+            ...frame,
+            centerHz: manualCenterMHz * 1e6,
+            spanHz: manualSpanMHz * 1e6,
+            binHz: (manualSpanMHz * 1e6) / frame.binsDbm.length,
+          };
+        }
+
+        return {
+          key,
+          name: radio?.name || key,
+          frame: resolvedFrame,
+        };
+      })
+      .filter((item): item is { key: string; name: string; frame: SpectrumFrame } => item !== null);
+  }, [selectedRawfeedKeys, spectrumData, allRadios, useManualFreq, manualCenterMHz, manualSpanMHz]);
 
   const opacities = useMemo(() =>
-    selectedRadios.map(key => layerOpacities[key] ?? 0.8),
-    [selectedRadios, layerOpacities]
+    selectedSpectrumKeys.map((key) => layerOpacities[key] ?? 0.8),
+    [selectedSpectrumKeys, layerOpacities]
   );
 
   const handleMarkerAdd = useCallback((hz: number) => {
@@ -363,6 +457,9 @@ const SpectrumLab: React.FC = () => {
       setIsClearingEvents(false);
     }
   }, [isClearingEvents, refetchEvents]);
+
+  const hasSpectrumSelection = selectedSpectrumKeys.length > 0;
+  const hasRawfeedSelection = selectedRawfeedKeys.length > 0;
 
   // Loading state
   if (isLoading) {
@@ -456,6 +553,9 @@ const SpectrumLab: React.FC = () => {
                     <p className="text-sm font-medium truncate">{radio.name}</p>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <span>{radio.type}</span>
+                      <Badge variant="outline" className="text-[9px] px-1 py-0 capitalize">
+                        {radio.sourceType}
+                      </Badge>
                       <Badge
                         variant={radio.disabled ? 'secondary' : 'outline'}
                         className="text-[9px] px-1 py-0"
@@ -579,25 +679,27 @@ const SpectrumLab: React.FC = () => {
               </div>
 
               {/* Horizontal marker controls */}
-              <div className="flex items-center gap-2 border-l pl-3">
-                <Crosshair className="h-3.5 w-3.5 text-muted-foreground" />
-                <Input
-                  type="number"
-                  step="0.1"
-                  value={horizontalMarkerInput}
-                  onChange={(e) => setHorizontalMarkerInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      handleAddHorizontalFromInput();
-                    }
-                  }}
-                  placeholder="dB"
-                  className="h-7 w-20 text-xs"
-                />
-                <Button variant="outline" size="sm" onClick={handleAddHorizontalFromInput}>
-                  Add dB Line
-                </Button>
-              </div>
+              {hasSpectrumSelection && (
+                <div className="flex items-center gap-2 border-l pl-3">
+                  <Crosshair className="h-3.5 w-3.5 text-muted-foreground" />
+                  <Input
+                    type="number"
+                    step="0.1"
+                    value={horizontalMarkerInput}
+                    onChange={(e) => setHorizontalMarkerInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        handleAddHorizontalFromInput();
+                      }
+                    }}
+                    placeholder="dB"
+                    className="h-7 w-20 text-xs"
+                  />
+                  <Button variant="outline" size="sm" onClick={handleAddHorizontalFromInput}>
+                    Add dB Line
+                  </Button>
+                </div>
+              )}
             </div>
             <Badge
               variant={isStreaming && isConnected ? 'default' : 'secondary'}
@@ -624,62 +726,105 @@ const SpectrumLab: React.FC = () => {
           </CardContent>
         </Card>
 
-        {/* Spectrum Chart */}
+        {/* Spectrum / Rawfeed Visualization */}
         <Card className="min-h-[520px]">
-          <CardContent className="pt-4 flex flex-col">
-            {chartData.length === 0 ? (
+          <CardContent className="pt-4 flex flex-col gap-4">
+            {selectedRadios.length === 0 ? (
               <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                {selectedRadios.length === 0
-                  ? 'Select radios to view spectrum'
-                  : !isStreaming
-                    ? 'Click Start to begin streaming'
-                    : 'Waiting for spectrum data...'}
+                Select radios to view live data
               </div>
             ) : (
               <>
-                <p className="text-xs text-muted-foreground mb-2">
-                  Click to add vertical frequency marker. Shift+click to add horizontal dB marker.
-                </p>
-                <SpectrumChart
-                  data={chartData}
-                  markers={markers}
-                  horizontalMarkers={horizontalMarkers}
-                  onMarkerAdd={handleMarkerAdd}
-                  onHorizontalMarkerAdd={handleHorizontalMarkerAdd}
-                  width={900}
-                  height={370}
-                  opacities={opacities}
-                />
+                {hasSpectrumSelection && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide">
+                      Spectrum Feeds
+                    </p>
+                    {spectrumChartData.length === 0 ? (
+                      <div className="min-h-[220px] flex items-center justify-center rounded-lg border border-dashed border-border/60 text-muted-foreground text-sm">
+                        {!isStreaming ? 'Click Start to begin streaming' : 'Waiting for spectrum data...'}
+                      </div>
+                    ) : (
+                      <>
+                        <p className="text-xs text-muted-foreground mb-2">
+                          Click to add vertical frequency marker. Shift+click to add horizontal dB marker.
+                        </p>
+                        <SpectrumChart
+                          data={spectrumChartData}
+                          markers={markers}
+                          horizontalMarkers={horizontalMarkers}
+                          onMarkerAdd={handleMarkerAdd}
+                          onHorizontalMarkerAdd={handleHorizontalMarkerAdd}
+                          width={900}
+                          height={370}
+                          opacities={opacities}
+                        />
+                      </>
+                    )}
+
+                    {/* Layer controls */}
+                    {selectedSpectrumKeys.length > 0 && (
+                      <div className="mt-4 space-y-2">
+                        {selectedSpectrumKeys.map((radioKey, idx) => {
+                          const radio = allRadios.find((r) => r.radioKey === radioKey);
+                          const colors = ['hsl(217,91%,60%)', 'hsl(187,96%,42%)', 'hsl(160,84%,39%)', 'hsl(38,92%,50%)'];
+
+                          return (
+                            <div key={radioKey} className="flex items-center gap-4">
+                              <div
+                                className="w-3 h-3 rounded"
+                                style={{ backgroundColor: colors[idx % colors.length] }}
+                              />
+                              <span className="text-sm w-32 truncate">{radio?.name || radioKey}</span>
+                              <Slider
+                                value={[(layerOpacities[radioKey] ?? 0.8) * 100]}
+                                onValueChange={([v]) => setLayerOpacities((prev) => ({ ...prev, [radioKey]: v / 100 }))}
+                                max={100}
+                                className="w-32"
+                              />
+                              <span className="text-xs text-muted-foreground w-8">
+                                {Math.round((layerOpacities[radioKey] ?? 0.8) * 100)}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {hasRawfeedSelection && (
+                  <div className={hasSpectrumSelection ? 'pt-4 border-t border-border/40' : ''}>
+                    <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wide">
+                      Rawfeed Waterfall
+                    </p>
+                    {rawfeedWaterfalls.length === 0 ? (
+                      <div className="min-h-[220px] flex items-center justify-center rounded-lg border border-dashed border-border/60 text-muted-foreground text-sm">
+                        {!isStreaming ? 'Click Start to begin streaming' : 'Waiting for raw IQ frames...'}
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {rawfeedWaterfalls.map((waterfall) => (
+                          <div key={waterfall.key} className="space-y-1">
+                            <p className="text-xs text-muted-foreground">{waterfall.name}</p>
+                            <WaterfallChart
+                              frame={waterfall.frame}
+                              width={900}
+                              height={300}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {!hasSpectrumSelection && !hasRawfeedSelection && (
+                  <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                    Selected radios are not stream-capable
+                  </div>
+                )}
               </>
-            )}
-
-            {/* Layer controls */}
-            {selectedRadios.length > 0 && (
-              <div className="mt-4 space-y-2">
-                {selectedRadios.map((radioKey, idx) => {
-                  const radio = allRadios.find(r => r.radioKey === radioKey);
-                  const colors = ['hsl(217,91%,60%)', 'hsl(187,96%,42%)', 'hsl(160,84%,39%)', 'hsl(38,92%,50%)'];
-
-                  return (
-                    <div key={radioKey} className="flex items-center gap-4">
-                      <div
-                        className="w-3 h-3 rounded"
-                        style={{ backgroundColor: colors[idx % colors.length] }}
-                      />
-                      <span className="text-sm w-32 truncate">{radio?.name || radioKey}</span>
-                      <Slider
-                        value={[(layerOpacities[radioKey] ?? 0.8) * 100]}
-                        onValueChange={([v]) => setLayerOpacities(prev => ({ ...prev, [radioKey]: v / 100 }))}
-                        max={100}
-                        className="w-32"
-                      />
-                      <span className="text-xs text-muted-foreground w-8">
-                        {Math.round((layerOpacities[radioKey] ?? 0.8) * 100)}%
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
             )}
           </CardContent>
         </Card>

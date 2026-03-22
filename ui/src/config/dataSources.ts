@@ -90,6 +90,9 @@ export function adaptDataSourceDto(dto: DataSourceDto): {
     mqtt: dto.mqttTopic ? { spectrumTopic: dto.mqttTopic } : undefined,
     meta: {
       type: dto.deviceKey || dto.sourceType,
+      sourceType: String(dto.sourceType || "").toLowerCase(),
+      mqttTopic: dto.mqttTopic,
+      displayName: dto.displayName,
       deviceId: dto.deviceId,
       capabilities: dto.capabilities,
       lastSeenAt: dto.lastSeenAt,
