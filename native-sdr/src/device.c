@@ -287,7 +287,7 @@ int sdr_device_is_running(sdr_device_handle_t* h) {
     }
 
     atomic_store(&h->running, 0);
-    if (rc == HACKRF_FALSE) {
+    if (rc >= 0) {
       set_error("hackrf stream stopped");
     } else {
       snprintf(g_last_error,
