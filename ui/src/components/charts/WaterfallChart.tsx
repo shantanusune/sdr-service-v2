@@ -148,11 +148,13 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, width, height);
 
-    const padding = { top: 28, right: 58, bottom: 48, left: 34 };
+    const padding = { top: 26, right: 120, bottom: 48, left: 58 };
     const colorBarWidth = 12;
     const colorBarGap = 10;
     const chartWidth = Math.max(1, Math.floor(width - padding.left - padding.right));
     const chartHeight = Math.max(1, Math.floor(height - padding.top - padding.bottom));
+    const chartWidthPx = Math.max(1, Math.floor(chartWidth * dpr));
+    const chartHeightPx = Math.max(1, Math.floor(chartHeight * dpr));
 
     const rows = rowsRef.current;
     if (rows.length === 0) {
@@ -165,26 +167,29 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
 
     const { minDb, maxDb, dbRange } = computeDbRange(rows);
 
-    const image = ctx.createImageData(chartWidth, chartHeight);
+    // putImageData operates in device pixels (ignores transform), so render in px.
+    const image = ctx.createImageData(chartWidthPx, chartHeightPx);
     const pixels = image.data;
 
-    const visibleRows = Math.min(chartHeight, rows.length);
-    const startIndex = Math.max(0, rows.length - visibleRows);
-    for (let dy = 0; dy < visibleRows; dy++) {
-      const rowIndex = startIndex + dy;
+    const renderRows = Math.min(chartHeightPx, rows.length);
+    const startIndex = Math.max(0, rows.length - renderRows);
+    const yOffset = chartHeightPx - renderRows;
+
+    for (let py = 0; py < renderRows; py++) {
+      const rowIndex = startIndex + py;
       const row = rows[rowIndex];
       const bins = row.bins;
       const binsLen = bins.length;
-      const y = dy; // oldest at top, newest at bottom
+      const y = yOffset + py; // keep newest near bottom while history grows
 
-      for (let x = 0; x < chartWidth; x++) {
-        const binIndex = Math.min(binsLen - 1, Math.floor((x / chartWidth) * binsLen));
+      for (let x = 0; x < chartWidthPx; x++) {
+        const binIndex = Math.min(binsLen - 1, Math.floor((x / chartWidthPx) * binsLen));
         const db = bins[binIndex];
         const normalized = Number.isFinite(db) ? (db - minDb) / dbRange : 0;
         const paletteIndex = clamp(Math.round(normalized * 255), 0, 255);
         const [r, g, b] = WATERFALL_PALETTE[paletteIndex];
 
-        const px = (y * chartWidth + x) * 4;
+        const px = (y * chartWidthPx + x) * 4;
         pixels[px] = r;
         pixels[px + 1] = g;
         pixels[px + 2] = b;
@@ -192,7 +197,7 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
       }
     }
 
-    ctx.putImageData(image, Math.round(padding.left), Math.round(padding.top));
+    ctx.putImageData(image, Math.round(padding.left * dpr), Math.round(padding.top * dpr));
 
     // Grid overlay
     ctx.strokeStyle = GRID_COLOR;
@@ -238,7 +243,7 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
 
     // Title
     ctx.fillStyle = AXIS_COLOR;
-    ctx.font = '24px sans-serif';
+    ctx.font = '18px sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(title || 'Waterfall History', width / 2, 22);
 
@@ -250,7 +255,7 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     for (let i = 0; i <= yTicks; i++) {
       const ratio = i / yTicks;
       const y = padding.top + chartHeight * ratio;
-      const sweep = -Math.round(visibleRows - (visibleRows - 1) * ratio);
+      const sweep = -Math.round(renderRows * (1 - ratio));
       ctx.fillText(`${sweep}`, padding.left - 6, y + 4);
     }
 
@@ -269,17 +274,17 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
       for (let i = 0; i <= 10; i++) {
         const x = padding.left + (chartWidth * i) / 10;
         const freq = startMHz + ((endMHz - startMHz) * i) / 10;
-        ctx.fillText(`${freq.toFixed(2)} MHz`, x, height - 10);
+        ctx.fillText(`${Math.round(freq)} MHz`, x, height - 10);
       }
 
       ctx.textAlign = 'center';
       ctx.fillText('Frequency', padding.left + chartWidth / 2, height - 24);
 
       ctx.textAlign = 'left';
-      ctx.fillText(`Start: ${startMHz.toFixed(0)} MHz`, 4, height - 2);
+      ctx.fillText(`Start: ${Math.round(startMHz)} MHz`, 4, height - 2);
 
       ctx.textAlign = 'right';
-      ctx.fillText(`Stop: ${endMHz.toFixed(0)} MHz`, width - 4, height - 2);
+      ctx.fillText(`Stop: ${Math.round(endMHz)} MHz`, width - 4, height - 2);
     }
 
     // Color bar dB labels
