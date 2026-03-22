@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
@@ -11,13 +12,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Play, Square, Zap, AlertTriangle, Radio } from "lucide-react";
+import { Play, Square, Zap, AlertTriangle, Radio, Plus, Trash2 } from "lucide-react";
 import { WebSocketStreamClient } from "@/services/stream";
 import type { StreamClient, SpectrumMessage } from "@/services/stream";
 import { toSpectrumFrame } from "@/services/spectrumAdapter";
 import { loadFilters } from "@/services/filterStore";
 import { useFilterWorker } from "@/hooks/useFilterWorker";
-import type { SpectrumFrame, FilterConfig, MatchResult } from "@/types/sdr";
+import { FILTER_TYPE_INFO } from "@/types/sdr";
+import type { SpectrumFrame, FilterConfig, MatchResult, FilterSeverity } from "@/types/sdr";
 import { useStreamableDatasources } from "@/hooks/useDatasources";
 import { groupDataSourcesByHost, loadSelectedRadios, saveSelectedRadios } from "@/config/dataSources";
 import type { DataSource } from "@/types/sources";
@@ -52,6 +54,123 @@ function resolveDbWindow(bins: number[]): { minDb: number; maxDb: number } {
   return { minDb, maxDb };
 }
 
+type QuickFilterType = "peak_in_band" | "threshold_in_band" | "avg_power_in_band";
+
+const QUICK_FILTER_PRESETS: Record<
+  QuickFilterType,
+  {
+    label: string;
+    thresholdLabel: string;
+    defaultThresholdDbm: number;
+  }
+> = {
+  peak_in_band: {
+    label: "Peak in Band",
+    thresholdLabel: "Peak Threshold (dBm)",
+    defaultThresholdDbm: -60,
+  },
+  threshold_in_band: {
+    label: "Threshold in Band",
+    thresholdLabel: "Threshold (dBm)",
+    defaultThresholdDbm: -65,
+  },
+  avg_power_in_band: {
+    label: "Average Power in Band",
+    thresholdLabel: "Average Threshold (dBm)",
+    defaultThresholdDbm: -75,
+  },
+};
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+function firstField(payload: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      return payload[key];
+    }
+  }
+  return undefined;
+}
+
+function parseBins(raw: unknown): number[] | null {
+  if (Array.isArray(raw)) {
+    const bins = raw
+      .map((item) => toFiniteNumber(item))
+      .filter((item): item is number => item !== null);
+    return bins.length > 0 ? bins : null;
+  }
+
+  if (typeof raw === "string") {
+    const bins = raw
+      .split(/[,\s]+/)
+      .map((chunk) => chunk.trim())
+      .filter((chunk) => chunk.length > 0)
+      .map((chunk) => Number(chunk))
+      .filter((item) => Number.isFinite(item));
+    return bins.length > 0 ? bins : null;
+  }
+
+  return null;
+}
+
+function normalizeCustomPayload(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+
+  const parsed = raw as Record<string, unknown>;
+  const nestedPayload = parsed.payload;
+  const payload =
+    nestedPayload && typeof nestedPayload === "object"
+      ? (nestedPayload as Record<string, unknown>)
+      : parsed;
+
+  const normalized: Record<string, unknown> = { ...payload };
+  const ts = toFiniteNumber(firstField(payload, ["ts", "timestamp", "time"]));
+  const centerHz = toFiniteNumber(
+    firstField(payload, ["cf", "centerFrequency", "centerHz", "center_frequency"])
+  );
+  const spanHz = toFiniteNumber(
+    firstField(payload, ["sr", "sampleRate", "spanHz", "span", "sample_rate"])
+  );
+  const binHz = toFiniteNumber(firstField(payload, ["binHz", "bin_hz", "freqStep"]));
+  const bins = parseBins(firstField(payload, ["bins", "binsDbm", "data", "values", "powers", "spectrum"]));
+  const frameId = firstField(payload, ["frameId", "frame_id", "id", "seq"]);
+
+  normalized.ts = ts ?? Date.now();
+  if (centerHz !== null) normalized.cf = centerHz;
+  if (spanHz !== null) normalized.sr = spanHz;
+  if (binHz !== null) normalized.binHz = binHz;
+  if (bins) normalized.bins = bins;
+  if (frameId !== undefined && frameId !== null) normalized.frameId = String(frameId);
+
+  return normalized;
+}
+
+function buildQuickFilterParams(type: QuickFilterType, thresholdDbm: number): FilterConfig["params"] {
+  switch (type) {
+    case "peak_in_band":
+      return { peakThresholdDbm: thresholdDbm };
+    case "threshold_in_band":
+      return { thresholdDbm: thresholdDbm };
+    case "avg_power_in_band":
+      return { avgThresholdDbm: thresholdDbm };
+    default:
+      return {};
+  }
+}
+
 const AdminTest: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
@@ -61,8 +180,19 @@ const AdminTest: React.FC = () => {
   const [lastFrame, setLastFrame] = useState<SpectrumFrame | null>(null);
   const [recentMatches, setRecentMatches] = useState<MatchResult[]>([]);
   const [filters, setFilters] = useState<FilterConfig[]>([]);
+  const [quickFilters, setQuickFilters] = useState<FilterConfig[]>([]);
   const [testPayload, setTestPayload] = useState<string>("");
+  const [payloadError, setPayloadError] = useState<string | null>(null);
   const [selectedRadio, setSelectedRadio] = useState("");
+  const [quickType, setQuickType] = useState<QuickFilterType>("peak_in_band");
+  const [quickName, setQuickName] = useState("");
+  const [quickStartHz, setQuickStartHz] = useState<number>(2_395_000_000);
+  const [quickEndHz, setQuickEndHz] = useState<number>(2_405_000_000);
+  const [quickThresholdDbm, setQuickThresholdDbm] = useState<number>(
+    QUICK_FILTER_PRESETS.peak_in_band.defaultThresholdDbm
+  );
+  const [quickSeverity, setQuickSeverity] = useState<FilterSeverity>("warn");
+  const [quickCooldownMs, setQuickCooldownMs] = useState<number>(1000);
 
   const clientRef = useRef<StreamClient | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -108,6 +238,10 @@ const AdminTest: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    setQuickThresholdDbm(QUICK_FILTER_PRESETS[quickType].defaultThresholdDbm);
+  }, [quickType]);
+
+  useEffect(() => {
     if (dataSources.length === 0) return;
 
     const available = dataSources.flatMap((source) =>
@@ -140,25 +274,41 @@ const AdminTest: React.FC = () => {
     saveSelectedRadios([{ sourceId, radioId }]);
   }, [selectedRadio]);
 
+  const activeFilters = useMemo(
+    () =>
+      [...filters, ...quickFilters].filter((filter) => filter.enabled && filter.scope !== "disabled"),
+    [filters, quickFilters]
+  );
+
+  const processFrame = useCallback(
+    (frame: SpectrumFrame, radioKey?: string) => {
+      setLastFrame(frame);
+      setFrameCount((c) => c + 1);
+
+      if (workerReady && activeFilters.length > 0) {
+        evaluateFilters(
+          frame,
+          activeFilters,
+          (matches) => {
+            if (matches.length > 0) {
+              setMatchCount((c) => c + matches.length);
+              setRecentMatches((prev) => [...matches, ...prev].slice(0, 10));
+            }
+          },
+          radioKey
+        );
+      }
+    },
+    [workerReady, activeFilters, evaluateFilters]
+  );
+
   const handleSpectrumMessage = useCallback(
     (msg: SpectrumMessage) => {
       const frame = toSpectrumFrame(msg.payload);
       if (!frame) return;
-
-      setLastFrame(frame);
-      setFrameCount((c) => c + 1);
-
-      const enabledFilters = filters.filter((f) => f.enabled);
-      if (workerReady && enabledFilters.length > 0) {
-        evaluateFilters(frame, enabledFilters, (matches) => {
-          if (matches.length > 0) {
-            setMatchCount((c) => c + matches.length);
-            setRecentMatches((prev) => [...matches, ...prev].slice(0, 10));
-          }
-        });
-      }
+      processFrame(frame, `${msg.sourceId}:${msg.radioId}`);
     },
-    [filters, workerReady, evaluateFilters]
+    [processFrame]
   );
 
   const handleStart = async () => {
@@ -233,26 +383,110 @@ const AdminTest: React.FC = () => {
     };
   }, []);
 
+  const addQuickFilter = () => {
+    const startHz = Number(quickStartHz);
+    const endHz = Number(quickEndHz);
+    const thresholdDbm = Number(quickThresholdDbm);
+    const cooldownMs = Number(quickCooldownMs);
+
+    if (!Number.isFinite(startHz) || !Number.isFinite(endHz)) {
+      toast({
+        title: "Invalid band range",
+        description: "Band start and end must be valid numbers",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (endHz <= startHz) {
+      toast({
+        title: "Invalid band range",
+        description: "Band end must be greater than band start",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!Number.isFinite(thresholdDbm)) {
+      toast({
+        title: "Invalid threshold",
+        description: "Threshold must be a valid number",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const preset = QUICK_FILTER_PRESETS[quickType];
+    const filterName =
+      quickName.trim() ||
+      `${preset.label} ${(startHz / 1e6).toFixed(3)}-${(endHz / 1e6).toFixed(3)} MHz`;
+
+    const quickFilter: FilterConfig = {
+      id: `quick-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: filterName,
+      type: quickType,
+      category: FILTER_TYPE_INFO[quickType].category,
+      enabled: true,
+      scope: "test",
+      severity: quickSeverity,
+      cooldownMs: Number.isFinite(cooldownMs) ? Math.max(0, Math.floor(cooldownMs)) : 1000,
+      bands: [{ startHz, endHz }],
+      params: buildQuickFilterParams(quickType, thresholdDbm),
+      createdAt: Date.now(),
+    };
+
+    setQuickFilters((prev) => [quickFilter, ...prev]);
+    setQuickName("");
+    toast({
+      title: "Quick filter added",
+      description: `${filterName} is now active`,
+    });
+  };
+
+  const toggleQuickFilter = (id: string) => {
+    setQuickFilters((prev) =>
+      prev.map((filter) => (filter.id === id ? { ...filter, enabled: !filter.enabled } : filter))
+    );
+  };
+
+  const removeQuickFilter = (id: string) => {
+    setQuickFilters((prev) => prev.filter((filter) => filter.id !== id));
+  };
+
   const handleTestPayload = () => {
+    if (!testPayload.trim()) {
+      setPayloadError("Paste a payload JSON or click Load Sample.");
+      return;
+    }
+
     try {
       const payload = JSON.parse(testPayload);
-      const frame = toSpectrumFrame(payload);
-      if (frame) {
-        setLastFrame(frame);
-        setFrameCount((c) => c + 1);
-
-        const enabledFilters = filters.filter((f) => f.enabled);
-        if (workerReady && enabledFilters.length > 0) {
-          evaluateFilters(frame, enabledFilters, (matches) => {
-            if (matches.length > 0) {
-              setMatchCount((c) => c + matches.length);
-              setRecentMatches((prev) => [...matches, ...prev].slice(0, 10));
-            }
-          });
-        }
+      const normalizedPayload = normalizeCustomPayload(payload);
+      if (!normalizedPayload) {
+        setPayloadError("Payload must be a JSON object.");
+        return;
       }
+
+      const frame = toSpectrumFrame(normalizedPayload);
+      if (!frame) {
+        setPayloadError(
+          "Unable to parse payload. Required fields: center frequency, span/sample rate, and bins."
+        );
+        toast({
+          title: "Payload parsing failed",
+          description: "Expected cf/centerHz, sr/spanHz and bins array (or CSV bins string).",
+          variant: "destructive",
+        });
+        return;
+      }
+      setPayloadError(null);
+      processFrame(frame, selectedRadio || "custom-payload");
     } catch (e) {
-      console.error("Invalid JSON:", e);
+      const message = e instanceof Error ? e.message : "Invalid JSON";
+      setPayloadError(message);
+      toast({
+        title: "Invalid JSON",
+        description: message,
+        variant: "destructive",
+      });
     }
   };
 
@@ -414,7 +648,7 @@ const AdminTest: React.FC = () => {
               </div>
               <div className="text-center p-4 bg-muted rounded-lg">
                 <p className="text-2xl font-bold">
-                  {filters.filter((f) => f.enabled).length}
+                  {activeFilters.length}
                 </p>
                 <p className="text-xs text-muted-foreground">Active Filters</p>
               </div>
@@ -436,10 +670,17 @@ const AdminTest: React.FC = () => {
               <Label>JSON Payload</Label>
               <Textarea
                 value={testPayload}
-                onChange={(e) => setTestPayload(e.target.value)}
+                onChange={(e) => {
+                  setTestPayload(e.target.value);
+                  if (payloadError) setPayloadError(null);
+                }}
                 placeholder={samplePayload}
                 className="font-mono text-xs h-32"
               />
+              <p className="text-[11px] text-muted-foreground">
+                Accepts `payload` wrapper, aliases (`cf`/`centerHz`, `sr`/`spanHz`) and bins as array or CSV string.
+              </p>
+              {payloadError && <p className="text-xs text-destructive">{payloadError}</p>}
             </div>
             <div className="flex gap-2">
               <Button onClick={handleTestPayload} className="gap-2">
@@ -448,11 +689,144 @@ const AdminTest: React.FC = () => {
               </Button>
               <Button
                 variant="outline"
-                onClick={() => setTestPayload(samplePayload)}
+                onClick={() => {
+                  setTestPayload(samplePayload);
+                  setPayloadError(null);
+                }}
               >
                 Load Sample
               </Button>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Quick Filter Builder */}
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Quick Filters (On-The-Fly)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <div className="space-y-2">
+                <Label>Name (optional)</Label>
+                <Input
+                  value={quickName}
+                  onChange={(e) => setQuickName(e.target.value)}
+                  placeholder="ex: 2.4GHz burst watch"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Type</Label>
+                <Select value={quickType} onValueChange={(value) => setQuickType(value as QuickFilterType)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(QUICK_FILTER_PRESETS).map(([value, preset]) => (
+                      <SelectItem key={value} value={value}>
+                        {preset.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Band Start (Hz)</Label>
+                <Input
+                  type="number"
+                  value={quickStartHz}
+                  onChange={(e) => setQuickStartHz(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Band End (Hz)</Label>
+                <Input
+                  type="number"
+                  value={quickEndHz}
+                  onChange={(e) => setQuickEndHz(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>{QUICK_FILTER_PRESETS[quickType].thresholdLabel}</Label>
+                <Input
+                  type="number"
+                  step="1"
+                  value={quickThresholdDbm}
+                  onChange={(e) => setQuickThresholdDbm(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Severity</Label>
+                <Select
+                  value={quickSeverity}
+                  onValueChange={(value) => setQuickSeverity(value as FilterSeverity)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="info">Info</SelectItem>
+                    <SelectItem value="warn">Warn</SelectItem>
+                    <SelectItem value="critical">Critical</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Cooldown (ms)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={quickCooldownMs}
+                  onChange={(e) => setQuickCooldownMs(Number(e.target.value))}
+                />
+              </div>
+              <div className="flex items-end">
+                <Button onClick={addQuickFilter} className="w-full gap-2">
+                  <Plus className="h-4 w-4" />
+                  Add Quick Filter
+                </Button>
+              </div>
+            </div>
+
+            {quickFilters.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No quick filters yet.</p>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                {quickFilters.map((filter) => (
+                  <div
+                    key={filter.id}
+                    className="rounded border border-border/70 bg-muted/30 p-3 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="font-medium text-sm">{filter.name}</p>
+                        <p className="text-muted-foreground">
+                          {FILTER_TYPE_INFO[filter.type].label} |{" "}
+                          {(filter.bands[0]?.startHz ?? 0).toLocaleString()} -{" "}
+                          {(filter.bands[0]?.endHz ?? 0).toLocaleString()} Hz
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant={filter.enabled ? "secondary" : "outline"}
+                          onClick={() => toggleQuickFilter(filter.id)}
+                        >
+                          {filter.enabled ? "Enabled" : "Disabled"}
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => removeQuickFilter(filter.id)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
 

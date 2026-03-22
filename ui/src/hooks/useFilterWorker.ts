@@ -2,7 +2,9 @@ import { useRef, useCallback, useEffect, useState } from "react";
 import type { SpectrumFrame, FilterConfig, MatchResult } from "@/types/sdr";
 
 interface WorkerOutput {
-  matches: MatchResult[];
+  type?: "result" | "testResult";
+  matches?: MatchResult[];
+  result?: MatchResult | null;
   testResult?: MatchResult | null;
 }
 
@@ -23,7 +25,18 @@ export function useFilterWorker() {
 
     workerRef.current.onmessage = (event: MessageEvent<WorkerOutput>) => {
       if (pendingCallbackRef.current) {
-        pendingCallbackRef.current(event.data);
+        const payload = event.data;
+        if (payload?.type === "testResult") {
+          pendingCallbackRef.current({
+            matches: [],
+            testResult: payload.result ?? payload.testResult ?? null,
+          });
+        } else {
+          pendingCallbackRef.current({
+            matches: payload?.matches ?? [],
+            testResult: payload?.testResult ?? null,
+          });
+        }
         pendingCallbackRef.current = null;
       }
     };
@@ -55,8 +68,8 @@ export function useFilterWorker() {
         return;
       }
 
-      pendingCallbackRef.current = (output) => onResult(output.matches);
-      workerRef.current.postMessage({ frame, enabledFilters, radioKey });
+      pendingCallbackRef.current = (output) => onResult(output.matches ?? []);
+      workerRef.current.postMessage({ type: "evaluate", frame, enabledFilters, radioKey });
     },
     []
   );
@@ -78,10 +91,9 @@ export function useFilterWorker() {
 
       pendingCallbackRef.current = (output) => onResult(output.testResult ?? null);
       workerRef.current.postMessage({
+        type: "test",
         frame,
-        enabledFilters: [],
-        testMode: true,
-        testFilter: filter,
+        filter,
         radioKey,
       });
     },
@@ -92,14 +104,14 @@ export function useFilterWorker() {
    * Reset cooldowns
    */
   const resetCooldowns = useCallback(() => {
-    workerRef.current?.postMessage({ command: "reset", frame: null, enabledFilters: [] });
+    workerRef.current?.postMessage({ type: "command", command: "reset" });
   }, []);
 
   /**
    * Clear all temporal state
    */
   const clearState = useCallback(() => {
-    workerRef.current?.postMessage({ command: "clear", frame: null, enabledFilters: [] });
+    workerRef.current?.postMessage({ type: "command", command: "clear" });
   }, []);
 
   return { evaluate, testFilter, resetCooldowns, clearState, isReady };
