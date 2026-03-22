@@ -24,15 +24,15 @@ const MIN_TARGET_BINS = 192;
 const MAX_SAMPLED_VALUES = 24000;
 const GRID_COLOR = 'rgba(180, 195, 220, 0.20)';
 const COLOR_SCALE = [
-  '#040b17',
-  '#0d2f5f',
-  '#1456a2',
-  '#1d96c4',
-  '#34c18f',
-  '#8fd84f',
-  '#f0ca3a',
-  '#f08a31',
-  '#f24e1e',
+  '#05245f',
+  '#0b3f8f',
+  '#1165c5',
+  '#11a1d7',
+  '#20c88e',
+  '#8fda4a',
+  '#f1d13f',
+  '#f49532',
+  '#f25224',
   '#fff2e8',
 ];
 
@@ -247,11 +247,6 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
       heatmapData.length = cursor;
     }
 
-    const xCategories = Array.from({ length: binsCount }, (_, i) => i);
-    const yCategories = Array.from({ length: rowCount }, (_, i) => i);
-    const xLabelInterval = Math.max(1, Math.floor(binsCount / 10));
-    const yLabelInterval = Math.max(1, Math.floor(rowCount / 8));
-
     return {
       backgroundColor: '#000000',
       animation: false,
@@ -281,16 +276,16 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
         },
       },
       xAxis: {
-        type: 'category',
-        data: xCategories,
-        boundaryGap: false,
+        type: 'value',
+        min: 0,
+        max: binsCount - 1,
+        splitNumber: 10,
         axisLine: { lineStyle: { color: '#8ea2c6' } },
         axisTick: { show: true },
         axisLabel: {
           color: '#9fb2d6',
-          interval: xLabelInterval,
-          formatter: (_value: number, index: number) => {
-            const hz = startHz + ((endHz - startHz) * index) / Math.max(1, binsCount - 1);
+          formatter: (value: number) => {
+            const hz = startHz + ((endHz - startHz) * value) / Math.max(1, binsCount - 1);
             return `${(hz / 1e6).toFixed(2)} MHz`;
           },
         },
@@ -301,14 +296,14 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
         nameTextStyle: { color: '#a9bbdc' },
       },
       yAxis: {
-        type: 'category',
-        data: yCategories,
-        inverse: true,
+        type: 'value',
+        min: 0,
+        max: Math.max(1, rowCount - 1),
+        splitNumber: 8,
         axisLine: { lineStyle: { color: '#8ea2c6' } },
         axisLabel: {
           color: '#9fb2d6',
-          interval: yLabelInterval,
-          formatter: (_value: number, index: number) => `-${rowCount - index}`,
+          formatter: (value: number) => `-${Math.round(value + 1)}`,
         },
         splitLine: { show: true, lineStyle: { color: GRID_COLOR } },
         name: 'Sweep',
@@ -378,7 +373,7 @@ export const WaterfallChart: React.FC<WaterfallChartProps> = ({
     <div className={className || 'rounded-lg border border-border/40 overflow-hidden'} style={{ width, height }}>
       <ReactECharts
         option={option}
-        notMerge={false}
+        notMerge
         lazyUpdate
         opts={chartOpts}
         autoResize
